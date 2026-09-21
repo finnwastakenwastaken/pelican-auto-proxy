@@ -4,7 +4,8 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
-Nothing yet.
+- Docs: screenshots of the Setup, Status, Forwards, manual-forward and Plugins pages, and of a node's Allocations tab, in the README, quickstart, plugin and updating pages.
+- Quickstart: the five-minute figure now cites a first-time run (under five minutes, 2026-09-21) instead of a maintainer's rehearsal.
 
 ## [0.2.2] - 2026-09-21
 

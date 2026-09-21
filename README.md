@@ -1,54 +1,35 @@
 # Pelican Auto Proxy
 
-If your Pelican Panel and its game servers run on a home or office connection, players cannot reach them directly:
-there is no public IP, or your router is not yours to configure. Pelican Auto Proxy rents that public face out to a
-small VPS. Inside the panel you mark an allocation public, and within a minute players can connect through the VPS —
-no port forwarding on your router, no per-port proxy process, and (when the tunnel runs on the machine hosting the
-game server) players show up with their real IP instead of the VPS's.
+If your Pelican Panel and game servers run on a home connection, players cannot reach them directly. Pelican Auto
+Proxy gives you a public address on a cheap VPS instead. Players connect to that address; your home IP and your
+game server's IP are never shown to them. There is nothing to set up on your router.
 
-Forwarding happens in the kernel (nftables DNAT over a WireGuard tunnel), so one VPS can carry hundreds of forwarded
-ports without running hundreds of processes.
+**Status: early release (0.2.x).** The install below works end to end today. Version 1.0 will add screenshots and a
+run on a rented internet-facing VPS; until then, expect small changes to the docs, not to the commands.
 
-**Status: in development, not yet released.** Nothing here is installable yet; this documentation describes the
-5-minute install strangers will follow once a release exists.
+## Why you'd want this
 
-## How it works
+- **Your home IP stays hidden.** Players only ever see the VPS's address, never yours.
+- **Nothing on your network has to accept connections from the internet.** The connection is started from your side
+  going out to the VPS, so there is no port forwarding to configure and nothing listening for strangers to find.
+- **It is cheap.** It runs on the smallest VPS any provider sells; the part that runs there uses well under 20 MB of
+  memory.
+- **It is quick.** Setup takes about five minutes, using commands the plugin writes for you, so you do not need to
+  know networking terms to run them.
+- **Bans and player logs keep working.** In the normal setup, the game server still sees each player's real IP
+  address, not the VPS's.
 
-```
-                    ┌──────────────────────────┐
-   players  ───────►│   VPS (autoproxy-agent)  │
-                     │   nftables DNAT + WireGuard
-                     └────────────┬─────────────┘
-                                  │ WireGuard tunnel (UDP 51820)
-                    ┌─────────────┴─────────────┐
-                    │   your node host           │
-                    │   autoproxy-client          │
-                    │   Pelican Wings + game server│
-                    └─────────────────────────────┘
-                                  ▲
-                                  │ HTTPS (token + pinned cert)
-                    ┌─────────────┴─────────────┐
-                    │   Pelican Panel (anywhere)  │
-                    │   Auto Proxy plugin          │
-                    └─────────────────────────────┘
-```
+## What you need
 
-The VPS never sees your panel's database or your node's files — only the forwarding rules the plugin sends it and the
-game traffic it relays. The plugin talks to the VPS directly over HTTPS, from wherever the panel happens to run.
-
-## Requirements
-
-- A small VPS with a public IPv4 address, root access, and a kernel that supports WireGuard (any current Debian
-  kernel does).
-- Debian 12 or 13 on both the VPS and every node host that runs the tunnel client. Tested live on Debian 13; Debian 12
-  is expected to work but has not been tested yet. Ubuntu is not supported in this release; it is tracked for a
-  later one.
+- A small VPS with a public IPv4 address and root access. Any provider's cheapest plan works, running Debian 12 or
+  13. Tested live on Debian 13; Debian 12 is expected to work but has not been tested yet. Ubuntu is not supported in
+  this release; it is tracked for a later one.
 - A Pelican Panel install where you are a root admin, able to import a plugin zip.
-- About five minutes and three copy-paste commands.
+- About five minutes and two copy-paste commands.
 
-## Quick start
+## Five-minute setup
 
-The plugin generates every command below with your own values — these are examples of the shape, not values to
+The plugin generates every command below with your own values, these are examples of the shape, not values to
 type by hand. Full walkthrough with a "how to verify" step after each one: [docs/quickstart.md](docs/quickstart.md).
 
 **1. Install the agent on your VPS.** SSH in as root and run:
@@ -57,61 +38,54 @@ type by hand. Full walkthrough with a "how to verify" step after each one: [docs
 curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-vps.sh | sudo bash
 ```
 
-It prints a **VPS code** — a block of text, not a secret you type from memory. Copy it.
+It prints a **VPS code**: a block of text, not a secret you type from memory. Copy it.
 
 **2. Paste the VPS code into the plugin.** Import the plugin zip (Admin → Plugins → Import), install it, then open
 **Admin → Auto Proxy → Setup** and paste the code into step 1.
 
-_(Screenshot: Setup step 1, VPS connected, showing the agent version. Added at first release.)_
+![Setup page, step 1: a VPS is connected and its agent version is shown](docs/img/setup-step1.png)
 
-**3. Add each node.** For every node you want reachable, step 2 of the same page shows a join command built for that
-node — either a one-line install or a Docker Compose snippet. Run it on that node's host as root:
+**3. Add each node.** A node is a machine running your game servers. For every node you want reachable, step 2 of
+the same page shows a join command built for that node, either a one-line install or a Docker Compose snippet. Run
+it on that node's host as root:
 
 ```bash
 curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-client.sh | sudo bash -s -- <join code>
 ```
 
-_(Screenshot: Setup step 2, one node connected and one waiting for its first handshake. Added at first release.)_
+![Setup page, step 2: one node connected, one waiting for its first handshake with its join command shown](docs/img/setup-step2.png)
 
-Within a minute the plugin's Status page shows a handshake for that node. Give an allocation the alias `proxy` or
-`public` and, once a server is assigned to it, it is reachable from the internet within a minute too.
-
-## Supported layouts
-
-Every layout uses the same VPS and the same plugin; only where the tunnel client runs, and in what mode, changes.
-Full diagrams and "what the game server sees" for each: [docs/layouts.md](docs/layouts.md).
-
-- **Panel and node on one machine** — the most common home setup. One tunnel client, real player IPs.
-- **Panel on one machine, nodes on the same LAN** — one tunnel client per node host, each its own peer, real player IPs.
-- **Remote nodes on other networks** — each remote node runs its own tunnel client and connects independently.
-- **Site mode, for services that are not Pelican** — a client on one LAN machine forwards to other hosts on that LAN;
-  those hosts share one IP, the way a traditional reverse proxy works.
-
-The panel machine itself never runs a tunnel client. Wherever the panel lives, all it needs is outbound HTTPS to the
-VPS's API.
+Within a minute the plugin's Status page shows that node as connected. Type `proxy` or `public` into an
+allocation's Alias field and, once a game server is assigned to it, it is reachable from the internet within a
+minute too.
 
 ## What players see
 
-A game server sees the address the tunnel delivers packets from. When the tunnel client runs on the same host as the
-game server (real mode, the default for a node running Wings), players show up with their **real IP** — bans, geo
-rules and per-player connection limits all work normally. When traffic is forwarded across a LAN to another machine
-(site mode), every player looks like they are connecting from that one forwarding host, the same limitation any
-shared-IP proxy has.
+In the normal setup, the tunnel runs on the same machine as the game server, so players show up with their **real
+IP address**. Bans, location-based rules and per-player connection limits all keep working exactly as before.
 
-## Security summary
+If instead one machine on your network forwards traffic to other machines on your behalf, every player looks like
+they are connecting from that one forwarding machine. This is the same limitation any shared-IP setup has, so use
+it only when the tunnel cannot run directly on the game server's own machine.
 
-- The VPS only relays traffic and applies rules the plugin sends it over an authenticated, encrypted API; it does
-  not hold your panel's database, files or player data.
-- The API is protected by a token and a certificate pinned by the plugin at setup, with a lockout after repeated
-  failed attempts. Restricting the API port to your panel's IP is one command away — see
-  [docs/security.md](docs/security.md).
-- Only allocations you deliberately mark public (alias `proxy` or `public`, with a server assigned) are ever
-  forwarded; everything else stays closed. Full threat model: [docs/security.md](docs/security.md).
+## Supported layouts
 
-## Documentation
+One VPS and one plugin install cover every setup below: everything on one machine, several game servers on your
+home network, game servers spread across different providers, or a mix. Full diagrams for each:
+[docs/layouts.md](docs/layouts.md).
 
-- [Quick start](docs/quickstart.md) — the steps above, in full, with verification after each one.
-- [Supported layouts](docs/layouts.md) — four ways to arrange panel, nodes and the VPS.
+- **Everything on one machine**, the most common home setup. Real player IPs.
+- **Panel on one machine, game servers on others on the same network**, real player IPs.
+- **Game servers on other networks or providers**, each connects on its own, real player IPs.
+- **Forwarding to other services on your network**, including ones that are not Pelican at all, those services
+  share one address, the way a traditional reverse proxy works.
+
+The panel itself never runs a tunnel. Wherever the panel lives, all it needs is an outbound connection to the VPS.
+
+## Docs
+
+- [Quick start](docs/quickstart.md): the steps above in full, with a way to check that each one worked.
+- [Supported layouts](docs/layouts.md): four ways to arrange your panel, game servers and the VPS.
 - [Installing the VPS agent](docs/install-vps.md)
 - [Installing the node client](docs/install-client.md)
 - [Using the plugin](docs/plugin.md)
@@ -125,6 +99,14 @@ shared-IP proxy has.
 - [Architecture (for contributors)](docs/dev/architecture.md)
 - [Testing (for contributors)](docs/dev/testing.md)
 - [Cutting a release (for contributors)](docs/dev/release.md)
+
+## Security in one paragraph
+
+Your game server machine connects out to the VPS; nothing on your network accepts connections coming in from the
+internet, so there is nothing for someone scanning your home IP to find. Players only ever see the VPS's address,
+never your home IP or your game server's IP. The code the plugin gives you to connect a node works like a password
+rather than a one-time code: keep it as private as you would a password, because anyone who has it can join your
+tunnel as that node. Full details: [docs/security.md](docs/security.md).
 
 ## License
 

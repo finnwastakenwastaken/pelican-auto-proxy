@@ -6,6 +6,8 @@ only root admins can see or touch it.
 
 ## Setup page
 
+![The Setup page](img/setup.png)
+
 Three steps, each generating commands with your own values filled in — you should not need to type an IP, port or
 token by hand anywhere on this page.
 
@@ -97,12 +99,16 @@ The Setup page stays the normal path, and the one this page describes. The plugi
 
 ## Forwards page
 
+![The Forwards page](img/forwards.png)
+
 Lists every forward the VPS is currently applying: Pelican allocations marked public, and any manual forwards you
 added directly (see below). Read-only for allocation-based forwards — the alias field on the allocation is the
 only control for those; this page just shows the result. Each row shows the public port, the target, and whether it
 is currently applied or withheld (see "conflicting forwards" under Banner meanings).
 
 ### Adding or editing a manual forward
+
+![The manual forward form](img/forward-create.png)
 
 The form is one page in three sections — Forward (name, protocol, public port or port range), Destination (a tunnel
 client, or an address on a LAN reached through one) and Options (enabled, notes) — with **Save** and **Cancel** at
@@ -117,6 +123,8 @@ address, the public port must not already be reserved (SSH, the WireGuard port, 
 forward, and a port range cannot remap to a different port.
 
 ## Status page
+
+![The Status page](img/status.png)
 
 The page refreshes itself every 30 seconds and shows the time of the last refresh at the top, so it can be left
 open on a second screen while you fix something. **Sync now** and **Test VPS** still work at any moment.

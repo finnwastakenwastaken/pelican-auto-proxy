@@ -4,6 +4,8 @@ Each of the three parts updates independently — you do not need to update the 
 the same time, though checking the [changelog](../CHANGELOG.md) for breaking notes before mixing old and new
 versions for long is worth the minute it takes.
 
+![The Plugins page with Pelican Auto Proxy installed](img/plugins.png)
+
 ## VPS agent
 
 Re-run the installer:

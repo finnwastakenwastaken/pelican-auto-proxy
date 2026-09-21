@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">Pelican Auto Proxy mark</title>
+  <!-- Tunnel ring: open on the right so the beak passes through it. -->
+  <path d="M192.2 199.3A96 96 0 1 1 221.2 104.8" fill="none" stroke="#c8262c" stroke-width="18" stroke-linecap="round"/>
+  <!-- Pouch (drawn first so the head tucks over it). -->
+  <path d="M236 154C230 180 208 192 180 190C152 188 130 172 124 152C127 143 132 136 141 130C176 140 208 148 236 154Z" fill="#c8262c"/>
+  <!-- Head and upper mandible, eye knocked out as negative space. -->
+  <path fill="#3b82f6" fill-rule="evenodd" d="M77 137A40 40 0 1 1 137 85C172 90 206 118 236 154C208 148 176 140 141 130A40 40 0 0 1 77 137ZM117 99A7 7 0 1 0 131 99A7 7 0 1 0 117 99Z"/>
+</svg>
