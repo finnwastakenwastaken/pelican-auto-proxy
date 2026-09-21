@@ -4,7 +4,7 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
-Nothing yet.
+- Brand kit under `brand/` (logo, wordmark, favicon, social preview, README banner, brand guide); banner at the top of the README.
 
 ## [0.2.3] - 2026-09-21
 

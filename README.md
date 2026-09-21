@@ -1,3 +1,5 @@
+<p align="center"><img src="brand/readme-banner.svg" alt="Pelican Auto Proxy" width="100%"></p>
+
 # Pelican Auto Proxy
 
 If your Pelican Panel and game servers run on a home connection, players cannot reach them directly. Pelican Auto
