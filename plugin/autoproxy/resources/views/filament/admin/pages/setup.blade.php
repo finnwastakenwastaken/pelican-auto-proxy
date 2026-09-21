@@ -99,7 +99,9 @@
                                 </div>
 
                                 <div class="mt-4 grid gap-3 sm:grid-cols-3">
-                                    <label class="block">
+                                    {{-- Two of the three columns: the option labels are full sentences and a
+                                         one-column select cut them off mid-word. --}}
+                                    <label class="block sm:col-span-2">
                                         <span class="text-xs font-medium text-gray-500 dark:text-gray-400">Mode</span>
                                         <x-filament::input.wrapper class="mt-1">
                                             <x-filament::input.select wire:model.live="nodeMode.{{ $node['id'] }}">

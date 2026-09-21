@@ -178,7 +178,9 @@ Lists what it is about to remove (the systemd unit, `/etc/autoproxy/client.json`
 `inet autoproxy_client` table, the `DOCKER-USER` rules if it added them) and asks for confirmation unless `--yes` is
 given. Without a terminal attached and without `--yes` it refuses rather than guessing. The apt packages it
 installed are left in place, and the live `ip_forward`/`rp_filter` kernel values stay as they are until reboot —
-only the file that made them persistent is removed.
+only the file that made them persistent is removed. If you remove packages afterwards, remove `wireguard-tools`
+only: on Debian, Docker depends on `nftables`, so removing that package stops Docker and every game server on the
+host.
 
 `autoproxy-client down` (without `uninstall`) brings the tunnel down without removing the installed files, if you
 want to pause forwarding without undoing the install.

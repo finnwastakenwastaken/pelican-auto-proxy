@@ -6,6 +6,16 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 Nothing yet.
 
+## [0.2.1] - 2026-09-21
+
+Found in the first timed install by the maintainer, on a panel reached over plain http.
+
+- Setup page: the Copy button floated on top of the join command and hid its end once the command was long
+  enough to scroll. The button now sits above the block. Clicking the command selects all of it, and when a
+  browser refuses the clipboard the page says so and leaves the text selected for Ctrl+C instead of pretending.
+- Setup page: the node mode dropdown was one grid column wide and cut its own labels off mid-word; it now spans two.
+- Client: the uninstall summary no longer suggests removing `nftables`. On Debian, Docker depends on it, so following that hint on a Wings host stopped Docker and every game server (seen on the test rig). The docs say the same.
+
 ## [0.2.0] - 2026-09-21
 
 First public release, before 1.0: a public fork of an earlier single-deployment prototype, renamed throughout and

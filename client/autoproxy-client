@@ -918,7 +918,9 @@ uninstall complete.
 
 Remaining on this system:
   - apt packages: wireguard-tools nftables curl iproute2 (not removed;
-    "apt-get remove wireguard-tools nftables" if you want those gone too)
+    "apt-get remove wireguard-tools" if you want that gone too. Leave
+    nftables alone on a Wings host: Docker depends on it, and removing it
+    takes Docker and every game server down with it)
   - net.ipv4.ip_forward and net.ipv4.conf.*.rp_filter keep their current
     live kernel value until reboot; only the persistence file was removed
 EOF
