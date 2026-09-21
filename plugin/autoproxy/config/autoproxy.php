@@ -24,10 +24,17 @@ return [
     // restarted agent is refilled without waiting for an edit.
     'heartbeat_minutes' => 10,
 
-    // HTTP timeouts in seconds. Status probes are short: they run on page load.
-    'connect_timeout' => 2,
-    'push_timeout' => 5,
-    'status_timeout' => 2,
+    // HTTP timeouts in seconds. Status probes run on page load, so they stay
+    // short, but not so short that one lost packet on the way to the VPS reads
+    // as "the VPS did not answer" (a TCP retransmit alone takes about a second;
+    // 2 s was too tight on a lossy provider network). Every request is also
+    // retried once after a failed connection: pushes send the full rule set,
+    // so a retry can never apply anything twice.
+    'connect_timeout' => 5,
+    'push_timeout' => 15,
+    'status_timeout' => 6,
+    'retries' => 1,
+    'retry_sleep_ms' => 500,
 
     // Send CURLOPT_PINNEDPUBLICKEY as well as verifying against the stored
     // certificate, when the VPS code carried an SPKI hash and curl supports it.

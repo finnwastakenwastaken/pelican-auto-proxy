@@ -4,6 +4,14 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.4] - 2026-09-21
+
+- Plugin: talking to the VPS now survives a lost packet. Connect timeout 2 s → 5 s, status probes 2 s → 6 s,
+  pushes 5 s → 15 s, and every request is retried once after a failed connection (never after an HTTP error).
+  Seen on a live deployment: a provider network with intermittent loss turned every second sync into "The VPS
+  did not answer in time" while the tunnel itself kept working.
 - Brand kit under `brand/` (logo, wordmark, favicon, social preview, README banner, brand guide); banner at the top of the README.
 
 ## [0.2.3] - 2026-09-21

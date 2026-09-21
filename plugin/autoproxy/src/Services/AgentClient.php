@@ -221,8 +221,17 @@ class AgentClient
         return Http::withToken($token)
             ->acceptJson()
             ->withOptions($options)
-            ->connectTimeout((int) config('autoproxy.connect_timeout', 2))
-            ->timeout($timeout);
+            ->connectTimeout((int) config('autoproxy.connect_timeout', 5))
+            ->timeout($timeout)
+            // Retry only when the connection itself failed (timeout, reset,
+            // handshake cut short), never on an HTTP answer: a 4xx/5xx is a
+            // real reply and repeating it would only hide it.
+            ->retry(
+                1 + max(0, (int) config('autoproxy.retries', 1)),
+                (int) config('autoproxy.retry_sleep_ms', 500),
+                fn (\Throwable $exception): bool => $exception instanceof ConnectionException,
+                throw: false,
+            );
     }
 
     /**
