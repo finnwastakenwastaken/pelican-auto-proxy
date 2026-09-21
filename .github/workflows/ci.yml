@@ -123,6 +123,18 @@ jobs:
       - name: scripts/test-checksum-parse.sh
         run: scripts/test-checksum-parse.sh
 
+  installers-resolve:
+    name: installers resolve, download and verify the latest release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Runs both installers as the docs print them, in a container with
+      # network but no NET_ADMIN, against the real latest public release. This
+      # is the path every first-time user takes and the one the live tests skip
+      # (they use AUTOPROXY_LOCAL_*). It found the "13 (trixie)" download URL.
+      - name: client/tests/test-install-resolve.sh
+        run: client/tests/test-install-resolve.sh
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest

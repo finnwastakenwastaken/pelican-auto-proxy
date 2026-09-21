@@ -18,7 +18,10 @@
 set -euo pipefail
 
 REPO="finnwastakenwastaken/pelican-auto-proxy"
-VERSION="${AUTOPROXY_VERSION:-latest}"
+# Named RELEASE, not VERSION: /etc/os-release is sourced below and it sets
+# VERSION to the OS version ("13 (trixie)"), which once became the download
+# path. See client/tests/test-install-resolve.sh.
+RELEASE="${AUTOPROXY_VERSION:-latest}"
 BASE_URL="https://github.com/${REPO}/releases/download"
 
 log() { printf '[install-client] %s\n' "$*"; }
@@ -82,14 +85,18 @@ if [[ -n "${AUTOPROXY_LOCAL_TARBALL:-}" ]]; then
         cp "${AUTOPROXY_LOCAL_TARBALL}.sha256" "$sums"
     fi
 else
-    if [[ "$VERSION" == "latest" ]]; then
+    if [[ "$RELEASE" == "latest" ]]; then
         log "resolving latest release"
-        VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-            | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-        [[ -n "$VERSION" ]] || { err "could not resolve the latest release from the GitHub API"; exit 1; }
-        log "latest release is ${VERSION}"
+        # Fetch first, parse second. Piping curl into grep -m1 closes the pipe
+        # early, curl exits 23, and with pipefail the whole install silently
+        # stops right here.
+        api_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
+            || { err "could not reach the GitHub API to find the latest release. Set AUTOPROXY_VERSION to a tag to skip this step."; exit 1; }
+        RELEASE="$(printf '%s\n' "$api_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+        [[ -n "$RELEASE" ]] || { err "the GitHub API returned no tag_name; set AUTOPROXY_VERSION to a release tag instead"; exit 1; }
+        log "latest release is ${RELEASE}"
     fi
-    url="${BASE_URL}/${VERSION}"
+    url="${BASE_URL}/${RELEASE}"
     log "downloading autoproxy-client.tar.gz and SHA256SUMS from ${url}"
     curl -fsSL -o "$tarball" "${url}/autoproxy-client.tar.gz"
     curl -fsSL -o "$sums" "${url}/SHA256SUMS"

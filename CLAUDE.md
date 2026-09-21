@@ -60,6 +60,7 @@ maintainer of this project.
 - Shell: `shellcheck` (koalaman/shellcheck:stable) and `bash -n` on every script, including `client/autoproxy-client`.
 - PHP: `php -l` on every plugin file; `php test/rules-test.php`.
 - `scripts/infra-sweep.sh` on the tree and on the built plugin zip.
+- `client/tests/test-install-resolve.sh`: both installers, verbatim, against the latest public release, in a container with network but no NET_ADMIN; must get past checksum verification.
 - Release workflow builds `autoproxy-agent_linux_amd64`, `autoproxy-client.tar.gz`, `autoproxy-<version>.zip` and
   `SHA256SUMS`; installers verify checksums and refuse on mismatch.
 

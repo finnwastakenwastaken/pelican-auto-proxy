@@ -6,6 +6,18 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 Nothing yet.
 
+## [0.2.2] - 2026-09-21
+
+Found in the same timed install, one step later. The plugin is unchanged; the version moves because the tag does.
+
+- Client installer: the download URL was built from the OS version ("13 (trixie)") instead of the release tag,
+  because sourcing `/etc/os-release` overwrote the variable holding the tag. Every install that did not use
+  `AUTOPROXY_LOCAL_TARBALL` failed with `curl: (3) URL rejected`. The variable is renamed.
+- Client installer: resolving the latest release could stop silently: `curl | grep -m1` closed the pipe early,
+  curl exited 23, and `pipefail` ended the script with no message. The response is fetched first and parsed second.
+- New gate `client/tests/test-install-resolve.sh`, also in CI: both installers, exactly as the docs print them,
+  against the latest public release, must reach checksum verification. It fails on the 0.2.1 installers.
+
 ## [0.2.1] - 2026-09-21
 
 Found in the first timed install by the maintainer, on a panel reached over plain http.
