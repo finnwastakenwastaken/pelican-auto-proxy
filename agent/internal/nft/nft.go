@@ -1,0 +1,285 @@
+// Package nft renders the agent-owned nftables table and applies it.
+//
+// The rendered file is a complete transaction:
+//
+//	table inet autoproxy_rules           # create if missing, no-op if present
+//	delete table inet autoproxy_rules    # remove it, elements and all
+//	table inet autoproxy_rules { ... }   # full definition
+//
+// nft applies a whole -f file as one netlink transaction, so the ruleset is
+// never half-applied: on a syntax or kernel error nothing changes. The table
+// is separate from the base firewall table, so a bad rule set cannot take SSH
+// or the tunnel down.
+//
+// The forward chain uses policy drop. Every base chain at a hook must accept
+// for a packet to pass, so a leftover Docker "ip filter" FORWARD chain with
+// policy drop would silently swallow every packet this table forwards while
+// "nft list table inet autoproxy_rules" still looks perfectly healthy. That is
+// why "autoproxy-agent setup" removes those orphans by exact table name.
+//
+// Verified in an isolated network namespace with nftables 1.1.x:
+// "flush table" is NOT enough. It empties the chains but leaves every set and
+// map element in place, so re-applying a changed range fails with
+// "Could not process rule: File exists" and applying an empty rule set leaves
+// every port open - a closed port that is silently still open. Declaring the
+// table and then deleting it makes the delete safe on a fresh boot too.
+package nft
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/rules"
+)
+
+// TableName is the agent-owned nftables table.
+const TableName = "inet autoproxy_rules"
+
+// Counts summarises what was applied.
+type Counts struct {
+	TCP   int `json:"tcp"`
+	UDP   int `json:"udp"`
+	Rules int `json:"rules"`
+}
+
+type element struct {
+	start int
+	end   int
+	ip    string
+	port  int // only used when remap is true
+	remap bool
+}
+
+func (e element) key() string { return fmt.Sprintf("%d-%d", e.start, e.end) }
+
+func (e element) text() string {
+	left := fmt.Sprintf("%d", e.start)
+	if e.end != e.start {
+		left = fmt.Sprintf("%d-%d", e.start, e.end)
+	}
+	if e.remap {
+		return fmt.Sprintf("%s : %s . %d", left, e.ip, e.port)
+	}
+	return fmt.Sprintf("%s : %s", left, e.ip)
+}
+
+type bucket struct {
+	addr  []element
+	remap []element
+}
+
+func (b *bucket) add(e element) {
+	if e.remap {
+		b.remap = append(b.remap, e)
+	} else {
+		b.addr = append(b.addr, e)
+	}
+}
+
+func (b *bucket) count() int { return len(b.addr) + len(b.remap) }
+
+func sortElements(es []element) {
+	sort.Slice(es, func(i, j int) bool {
+		if es[i].start != es[j].start {
+			return es[i].start < es[j].start
+		}
+		return es[i].end < es[j].end
+	})
+}
+
+func build(rs []rules.Resolved) (tcp, udp *bucket) {
+	tcp, udp = &bucket{}, &bucket{}
+	seen := map[string]bool{}
+	for _, r := range rules.Dedupe(rs) {
+		for _, p := range r.Protos() {
+			e := element{start: r.PublicPort, end: r.End(), ip: strings.TrimSpace(r.IP)}
+			if r.TargetPort != nil {
+				e.remap = true
+				e.port = *r.TargetPort
+			}
+			k := p + "/" + e.key()
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if p == "tcp" {
+				tcp.add(e)
+			} else {
+				udp.add(e)
+			}
+		}
+	}
+	sortElements(tcp.addr)
+	sortElements(tcp.remap)
+	sortElements(udp.addr)
+	sortElements(udp.remap)
+	return tcp, udp
+}
+
+// Count reports how many map elements a rule set produces.
+func Count(rs []rules.Resolved) Counts {
+	tcp, udp := build(rs)
+	return Counts{TCP: tcp.count(), UDP: udp.count(), Rules: len(rules.Dedupe(rs))}
+}
+
+func writeMap(sb *strings.Builder, name, valueType string, interval bool, es []element) {
+	fmt.Fprintf(sb, "\tmap %s {\n", name)
+	fmt.Fprintf(sb, "\t\ttype inet_service : %s\n", valueType)
+	if interval {
+		sb.WriteString("\t\tflags interval\n")
+	}
+	if len(es) > 0 {
+		sb.WriteString("\t\telements = {\n")
+		for i, e := range es {
+			sep := ","
+			if i == len(es)-1 {
+				sep = ""
+			}
+			fmt.Fprintf(sb, "\t\t\t%s%s\n", e.text(), sep)
+		}
+		sb.WriteString("\t\t}\n")
+	}
+	sb.WriteString("\t}\n")
+}
+
+// Render turns a resolved rule set into the nft file for the agent table.
+// publicIface is the VPS internet-facing interface, wgIface the tunnel.
+//
+// directTargets holds the tunnel addresses of every real-IP peer. Traffic on
+// its way to one of those is NOT masqueraded, which is the whole point of
+// real-IP mode: the game server on the other end sees the player's own
+// address. Everything else leaving the tunnel is masqueraded, because a host
+// on a peer's LAN has no route back into the tunnel and would answer the
+// player directly from an address the player never wrote to.
+func Render(rs []rules.Resolved, publicIface, wgIface string, directTargets []string) string {
+	tcp, udp := build(rs)
+	targets := append([]string{}, directTargets...)
+	sort.Strings(targets)
+
+	var sb strings.Builder
+	sb.WriteString("#!/usr/sbin/nft -f\n")
+	sb.WriteString("# Generated by autoproxy-agent. Do not edit: rewritten on every apply.\n")
+	sb.WriteString("\n")
+	// Declare-then-delete: the declaration makes the delete safe when the
+	// table does not exist yet (fresh boot), the delete removes the old map
+	// elements that "flush table" would leave behind.
+	fmt.Fprintf(&sb, "table %s\n", TableName)
+	fmt.Fprintf(&sb, "delete table %s\n", TableName)
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "table %s {\n", TableName)
+	writeMap(&sb, "tcp_addr", "ipv4_addr", true, tcp.addr)
+	writeMap(&sb, "udp_addr", "ipv4_addr", true, udp.addr)
+	writeMap(&sb, "tcp_remap", "ipv4_addr . inet_service", false, tcp.remap)
+	writeMap(&sb, "udp_remap", "ipv4_addr . inet_service", false, udp.remap)
+	sb.WriteString("\tset direct_targets {\n")
+	sb.WriteString("\t\ttype ipv4_addr\n")
+	if len(targets) > 0 {
+		fmt.Fprintf(&sb, "\t\telements = { %s }\n", strings.Join(targets, ", "))
+	}
+	sb.WriteString("\t}\n")
+	sb.WriteString("\n")
+	sb.WriteString("\tchain prerouting {\n")
+	sb.WriteString("\t\ttype nat hook prerouting priority dstnat; policy accept;\n")
+	fmt.Fprintf(&sb, "\t\tiifname %q dnat ip to tcp dport map @tcp_remap\n", publicIface)
+	fmt.Fprintf(&sb, "\t\tiifname %q dnat ip to udp dport map @udp_remap\n", publicIface)
+	fmt.Fprintf(&sb, "\t\tiifname %q dnat ip to tcp dport map @tcp_addr\n", publicIface)
+	fmt.Fprintf(&sb, "\t\tiifname %q dnat ip to udp dport map @udp_addr\n", publicIface)
+	sb.WriteString("\t}\n")
+	sb.WriteString("\n")
+	sb.WriteString("\tchain postrouting {\n")
+	sb.WriteString("\t\ttype nat hook postrouting priority srcnat; policy accept;\n")
+	fmt.Fprintf(&sb, "\t\toifname %q ip daddr != @direct_targets masquerade\n", wgIface)
+	sb.WriteString("\t}\n")
+	sb.WriteString("\n")
+	// policy drop: nothing crosses this box unless we DNAT'd it. The two
+	// accepts below are the whole allow list -- new inbound sessions that the
+	// prerouting chain rewrote, and the return traffic of anything already
+	// established.
+	sb.WriteString("\tchain forward {\n")
+	sb.WriteString("\t\ttype filter hook forward priority filter; policy drop;\n")
+	sb.WriteString("\t\tct state established,related accept\n")
+	fmt.Fprintf(&sb, "\t\tiifname %q oifname %q ct status dnat accept\n", publicIface, wgIface)
+	sb.WriteString("\t}\n")
+	sb.WriteString("}\n")
+	return sb.String()
+}
+
+// Applier runs the nft binary.
+type Applier struct {
+	Bin string // default "nft"
+}
+
+func (a Applier) bin() string {
+	if a.Bin == "" {
+		return "nft"
+	}
+	return a.Bin
+}
+
+func run(bin string, args ...string) (string, error) {
+	cmd := exec.Command(bin, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	err := cmd.Run()
+	return strings.TrimSpace(stderr.String()), err
+}
+
+// Apply writes text to a temporary file next to path, checks it with
+// "nft -c -f", applies it with "nft -f" and only then moves it into place.
+// On any failure the previous file at path is left untouched and nft's own
+// stderr is returned, so the caller can show the operator what nft objected to.
+func (a Applier) Apply(path, text string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".rules-*.nft")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed
+
+	if _, err := tmp.WriteString(text); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(0o640); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if out, err := run(a.bin(), "-c", "-f", tmpName); err != nil {
+		return fmt.Errorf("nft -c rejected the ruleset: %s", firstLines(out, err))
+	}
+	if out, err := run(a.bin(), "-f", tmpName); err != nil {
+		return fmt.Errorf("nft failed to apply the ruleset: %s", firstLines(out, err))
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("install %s: %w", path, err)
+	}
+	return nil
+}
+
+func firstLines(out string, err error) string {
+	if out == "" {
+		return err.Error()
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) > 12 {
+		lines = append(lines[:12], "...")
+	}
+	return strings.Join(lines, "; ")
+}

@@ -1,0 +1,14 @@
+# One regex per line. Any match in the tree (or in a built zip) fails the sweep.
+# This file is public: it may only contain *shapes*, never a private value.
+# A real IP, hostname, UUID, provider or person's name belongs in
+# scripts/infra-sweep.denylist.local, which is gitignored and read as well
+# when it exists. A denylist that publishes the values it protects is worse
+# than no denylist at all.
+#
+# Tokens and keys by shape (a 64-hex agent token, a base64 WireGuard key literal)
+[0-9a-f]{64}
+[A-Za-z0-9+/]{43}=
+# Shapes that betray a private deployment or a developer's machine
+\bhomelab\b
+@gmail\.com
+/home/[a-z]+/

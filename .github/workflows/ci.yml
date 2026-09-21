@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref so a rapid series of pushes doesn't queue redundant work.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go vet + test (agent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+      - name: go vet && go test
+        working-directory: agent
+        run: |
+          go vet ./...
+          go test ./...
+
+  nft-golden:
+    name: Golden nftables files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables
+      - name: nft -c -f every golden file
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # The client's expected output is golden too: it is the ruleset a
+          # node host actually loads, and nothing else checks it parses.
+          files=(agent/internal/nft/testdata/*.nft client/tests/expected/*.nft)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no golden .nft files found — nothing to check yet" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "checking $f"
+            sudo nft -c -f "$f"
+          done
+
+  shell:
+    name: shellcheck + bash -n
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: collect scripts
+        run: |
+          shopt -s nullglob
+          # scripts/*/*.sh too: the contract test and the VPS gate live in
+          # subdirectories, and a glob that stops at scripts/ silently exempts
+          # every script added there.
+          files=(installers/*.sh client/autoproxy-client client/tests/*.sh scripts/*.sh scripts/*/*.sh)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no shell scripts found" >&2
+            exit 1
+          fi
+          printf '%s\n' "${files[@]}" | tee "$RUNNER_TEMP/shell-scripts.txt"
+      # The list is read back from the file, never interpolated into a run
+      # block: a multi-line ${{ }} expansion turns every line after the first
+      # into its own command, so CI once *executed* installers/install-vps.sh
+      # instead of linting it.
+      - name: bash -n (syntax check)
+        run: |
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "bash -n $f"
+            bash -n "$f"
+          done < "$RUNNER_TEMP/shell-scripts.txt"
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+      - name: shellcheck
+        run: xargs -d '\n' -r shellcheck < "$RUNNER_TEMP/shell-scripts.txt"
+
+  php:
+    name: php -l + rules-test.php
+    runs-on: ubuntu-latest
+    container:
+      image: php:8.4-cli
+    steps:
+      - uses: actions/checkout@v5
+      - name: php -l every plugin file
+        # The container's default step shell is sh, which has no process
+        # substitution; the image ships bash.
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" || status=1
+          done < <(find plugin -name '*.php' -print0)
+          exit "$status"
+      - name: plugin rules test
+        run: php test/rules-test.php
+
+  infra-sweep:
+    name: infra sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: scripts/infra-sweep.sh
+        run: scripts/infra-sweep.sh
+
+  release-contract:
+    name: release artefacts match what the installers parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Builds a fixture release directory the way release.yml does, then runs both
+      # installers' own verification against it: an untouched artefact must be
+      # accepted, a corrupted one must be refused.
+      - name: scripts/test-checksum-parse.sh
+        run: scripts/test-checksum-parse.sh
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        uses: reviewdog/action-actionlint@v1

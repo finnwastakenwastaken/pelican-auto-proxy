@@ -1,0 +1,13 @@
+[Unit]
+Description=Pelican Auto Proxy tunnel client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/autoproxy-client run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

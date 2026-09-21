@@ -1,0 +1,16 @@
+{
+    "id": "autoproxy",
+    "name": "Pelican Auto Proxy",
+    "author": "Arrowtje",
+    "category": "plugin",
+    "namespace": "Arrowtje\\AutoProxy",
+    "class": "AutoProxyPlugin",
+    "panels": ["admin"],
+    "api_version": 1,
+    "composer_packages": null,
+    "version": "0.2.0",
+    "url": "https://github.com/finnwastakenwastaken/pelican-auto-proxy",
+    "update_url": "https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/update.json",
+    "panel_version": "^1.0.0-beta38",
+    "description": "Forwards Pelican allocations through your own VPS with kernel nftables DNAT over WireGuard. Real player IPs when the tunnel client runs on the Wings host."
+}

@@ -1,0 +1,199 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Dry run: build and check every asset exactly as a tag push would, then
+  # upload them as a workflow artifact instead of publishing a release. This is
+  # how the workflow is exercised before the first real tag, and on a private
+  # fork whose name differs from the plugin's public repository.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: derive version (tag without leading v; plugin.json on a dry run)
+        id: version
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="$(python3 -c 'import json; print(json.load(open("plugin/autoproxy/plugin.json"))["version"])')"
+            tag="v${version}"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::dry run: building ${tag} from plugin.json, nothing will be published"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: check plugin.json against the tag and this repository
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DRY_RUN: ${{ steps.version.outputs.dry_run }}
+        run: |
+          plugin_version="$(python3 -c 'import json; print(json.load(open("plugin/autoproxy/plugin.json"))["version"])')"
+          if [ "$plugin_version" != "$VERSION" ]; then
+            echo "plugin.json version ($plugin_version) does not match tag $TAG" >&2
+            exit 1
+          fi
+          # plugin.json's update_url must point at THIS repository's latest release, or
+          # the panel's update check quietly polls a URL nobody ever publishes to.
+          update_url="$(python3 -c 'import json; print(json.load(open("plugin/autoproxy/plugin.json")).get("update_url",""))')"
+          plugin_url="$(python3 -c 'import json; print(json.load(open("plugin/autoproxy/plugin.json")).get("url",""))')"
+          if [ "$update_url" != "${plugin_url}/releases/latest/download/update.json" ]; then
+            echo "plugin.json update_url is '$update_url' but its url is '$plugin_url'; the two must name the same repository" >&2
+            exit 1
+          fi
+          expected="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update.json"
+          if [ "$update_url" != "$expected" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "::warning::dry run on ${GITHUB_REPOSITORY}: plugin.json publishes to '$update_url'. A real tag here would fail this check."
+            else
+              echo "plugin.json update_url is '$update_url' but this repository publishes '$expected'" >&2
+              exit 1
+            fi
+          fi
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: build autoproxy-agent (linux/amd64)
+        working-directory: agent
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          mkdir -p ../dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${TAG}" \
+            -o ../dist/autoproxy-agent_linux_amd64 \
+            ./cmd/autoproxy-agent
+
+      # The next two steps run the same scripts a developer runs locally, so a release
+      # cannot quietly produce a different layout than the one tested before tagging.
+      - name: package autoproxy-client.tar.gz
+        run: |
+          scripts/package-client.sh dist/autoproxy-client.tar.gz
+          # The .sha256 sidecar exists for local AUTOPROXY_LOCAL_TARBALL testing;
+          # the release publishes SHA256SUMS instead.
+          rm -f dist/autoproxy-client.tar.gz.sha256
+
+      - name: package plugin zip (plugin.json at zip root)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          scripts/make-plugin-zip.sh
+          test -f "dist/autoproxy-${VERSION}.zip" ||
+            { echo "scripts/make-plugin-zip.sh did not produce dist/autoproxy-${VERSION}.zip" >&2; exit 1; }
+
+      - name: copy installers
+        run: |
+          cp installers/install-vps.sh dist/install-vps.sh
+          cp installers/install-client.sh dist/install-client.sh
+
+      - name: infra sweep on the built zip
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/infra-sweep.sh "dist/autoproxy-${VERSION}.zip"
+
+      # Consumed by the panel. Plugin::getUpdateData() fetches update_url and json()s it;
+      # isUpdateAvailable() and getDownloadUrlForUpdate() look up the panel's own version
+      # string as a key, fall back to "*", and read ["version"] and ["download_url"].
+      # download_url is pinned to this tag, never to /latest/, so a panel is offered
+      # exactly the version this manifest names.
+      - name: build update.json (Pelican plugin updater manifest)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          zip_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/autoproxy-${VERSION}.zip"
+          python3 -c 'import json,sys; open("dist/update.json","w").write(json.dumps({"*": {"version": sys.argv[1], "download_url": sys.argv[2]}}, indent=2) + "\n")' "$VERSION" "$zip_url"
+          # Read it back: a manifest nobody has opened is not a manifest.
+          python3 -c 'import json,sys; d=json.load(open("dist/update.json")); e=d["*"]; assert e["version"]==sys.argv[1], d; assert e["download_url"].endswith("/autoproxy-%s.zip" % sys.argv[1]), d; assert "autoproxy" not in d, "a top-level plugin-id key makes the panel descend a level"; print(json.dumps(d))' "$VERSION"
+
+      # coreutils format, exactly: <64 hex><two spaces><bare filename>. Both installers
+      # grep this file and pipe the line to `sha256sum -c`, which resolves the filename
+      # relative to its own working directory, so a directory prefix here turns a good
+      # download into a failed verification.
+      - name: checksums
+        working-directory: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sha256sum -- \
+            autoproxy-agent_linux_amd64 \
+            autoproxy-client.tar.gz \
+            "autoproxy-${VERSION}.zip" \
+            install-vps.sh \
+            install-client.sh \
+            update.json > SHA256SUMS
+          if grep -nvE '^[0-9a-f]{64}  [^/]+$' SHA256SUMS; then
+            echo "the SHA256SUMS lines above are not <64 hex><two spaces><bare filename>; the installers cannot verify them" >&2
+            exit 1
+          fi
+          if [ "$(wc -l < SHA256SUMS)" -ne 6 ]; then
+            echo "SHA256SUMS must list exactly the 6 published assets" >&2
+            cat SHA256SUMS >&2
+            exit 1
+          fi
+          cat SHA256SUMS
+
+      - name: extract this version's changelog section
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DRY_RUN: ${{ steps.version.outputs.dry_run }}
+        run: |
+          extract() {
+            awk -v ver="$1" '
+              $0 ~ "^## \\[" ver "\\]" { found=1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md
+          }
+          extract "$VERSION" > dist/RELEASE_NOTES.md
+          if [ ! -s dist/RELEASE_NOTES.md ] && [ "$DRY_RUN" = "true" ]; then
+            echo "::warning::no CHANGELOG.md section for ${VERSION} yet; using [Unreleased] for the dry run"
+            extract "Unreleased" > dist/RELEASE_NOTES.md
+          fi
+          if [ ! -s dist/RELEASE_NOTES.md ]; then
+            echo "no CHANGELOG.md section found for version ${VERSION} — add one before tagging" >&2
+            exit 1
+          fi
+
+      - name: upload assets as a workflow artifact (dry run only)
+        if: steps.version.outputs.dry_run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-dry-run-${{ steps.version.outputs.tag }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: create GitHub release
+        if: steps.version.outputs.dry_run != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/autoproxy-agent_linux_amd64
+            dist/autoproxy-client.tar.gz
+            dist/autoproxy-${{ steps.version.outputs.version }}.zip
+            dist/install-vps.sh
+            dist/install-client.sh
+            dist/update.json
+            dist/SHA256SUMS

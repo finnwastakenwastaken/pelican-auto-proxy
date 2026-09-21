@@ -1,0 +1,15 @@
+*.token
+*.key
+*.password
+*.env
+!*.env.example
+*.pem
+agent/bin/
+dist/
+*.zip
+client/autoproxy-client.tar.gz
+client/autoproxy-client.tar.gz.sha256
+!test/fixtures/*.zip
+node_modules/
+.DS_Store
+scripts/infra-sweep.denylist.local

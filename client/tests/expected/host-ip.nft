@@ -1,0 +1,30 @@
+table inet autoproxy_client {
+    chain mark_in {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "autoproxy0" ct state new ct mark set 0x2a
+    }
+
+    chain restore_fwd {
+        type filter hook prerouting priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain restore_out {
+        type route hook output priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "autoproxy0" accept
+        ct state established,related accept
+    }
+
+    # --host-ip fallback (install option): use when this host's allocations
+    # are bound to the LAN IP instead of 0.0.0.0, so Docker/Wings never sees
+    # a packet with dst = tunnel IP to begin with.
+    chain dnat_hostip {
+        type nat hook prerouting priority -101; policy accept;
+        ip daddr 10.66.66.1 meta l4proto { tcp, udp } dnat to 198.51.100.20
+    }
+}

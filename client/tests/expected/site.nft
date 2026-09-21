@@ -1,0 +1,32 @@
+table inet autoproxy_client {
+    chain mark_in {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "autoproxy0" ct state new ct mark set 0x2a
+    }
+
+    chain restore_fwd {
+        type filter hook prerouting priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain restore_out {
+        type route hook output priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "autoproxy0" accept
+        ct state established,related accept
+    }
+
+    # Site mode only. The LAN hosts this peer forwards to have no route back
+    # into the tunnel, so their replies must come from this machine: that is
+    # the shared-IP trade-off site mode is documented to make. Restricted to
+    # the peer's own LAN ranges, so traffic delivered to a container on this
+    # host is never touched and keeps the player's real address.
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        iifname "autoproxy0" oifname != "autoproxy0" ip daddr != 10.66.66.0/24 ip daddr { 192.0.2.0/24, 198.51.100.0/24 } masquerade
+    }
+}

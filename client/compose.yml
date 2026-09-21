@@ -1,0 +1,34 @@
+# Pelican Auto Proxy tunnel client, Docker Compose flavour.
+# See client/README.md for what this changes on the host and the Coolify
+# notes. Host networking is required: wg0-equivalent (autoproxy0) and the
+# nft tables must live in the host's kernel network namespace so a
+# container restart does not disconnect players.
+#
+# "sysctls:" is deliberately not set here: it has no effect together with
+# network_mode: host (there is no separate network namespace to apply it
+# to), and the container's entrypoint already sets the two sysctls it
+# needs directly on the host (net.ipv4.ip_forward, rp_filter on autoproxy0).
+
+services:
+  autoproxy-client:
+    build:
+      context: .
+    image: autoproxy-client:local
+    container_name: autoproxy-client
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    environment:
+      AUTOPROXY_JOIN_CODE: ${AUTOPROXY_JOIN_CODE}
+    healthcheck:
+      test: ["CMD", "autoproxy-client", "status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

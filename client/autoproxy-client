@@ -1,0 +1,978 @@
+#!/usr/bin/env bash
+# Pelican Auto Proxy tunnel client.
+#
+# Runs on a node host (bare metal/VM with systemd, or as the entrypoint of
+# the Docker image in client/Dockerfile). Brings up a WireGuard tunnel to
+# the VPS agent and the nftables/routing rules that let players reach
+# services on this host with their real source IP (or masqueraded, for
+# "site mode" targets elsewhere on the LAN).
+#
+# See docs/dev/architecture.md for the design this implements. The VPS side
+# is the Go agent under agent/; its WireGuard interface there is wg0, this
+# host's is autoproxy0, and the two must not be confused when reading either.
+#
+# Subcommands: install, up, run, status, down, uninstall, version.
+# AUTOPROXY_RENDER_ONLY=1 skips executing main() so this file can be
+# `source`d by client/tests/test-render.sh to unit-test the pure render_*
+# and decode/json_get functions without touching the network or the
+# filesystem.
+
+set -euo pipefail
+
+# --- constants ---------------------------------------------------------
+
+readonly AUTOPROXY_VERSION="0.1.0"
+readonly IFACE="autoproxy0"
+readonly FWMARK="0x2a"
+readonly RT_TABLE="200"
+readonly RT_PRIORITY="100"
+readonly STALE_SECONDS=600
+readonly LOG_INTERVAL=30
+readonly CONF_DIR="/etc/autoproxy"
+readonly CONF_FILE="${CONF_DIR}/client.json"
+readonly WG_CONF_DIR="/etc/wireguard"
+readonly WG_CONF_FILE="${WG_CONF_DIR}/${IFACE}.conf"
+readonly SYSCTL_FILE="/etc/sysctl.d/90-autoproxy.conf"
+readonly BIN_PATH="/usr/local/bin/autoproxy-client"
+readonly UNIT_PATH="/etc/systemd/system/autoproxy-client.service"
+
+# --- globals set at runtime ---------------------------------------------
+
+HAVE_PYTHON3=0
+DECODE_METHOD=""
+OS_PRETTY=""
+SUBCOMMAND=""
+ENDPOINT=""
+VPS_WG_PUBKEY=""
+CLIENT_ADDRESS=""
+TUNNEL_SUBNET=""
+VPS_TUNNEL_IP=""
+MODE=""
+KEEPALIVE=""
+LAN_CIDRS=""
+HOST_IP=""
+
+# --- logging -------------------------------------------------------------
+
+log() {
+    printf '%s [autoproxy-client] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+warn() {
+    printf '%s [autoproxy-client] WARNING: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+err() {
+    printf '%s [autoproxy-client] ERROR: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+# --- small helpers ---------------------------------------------------------
+
+need_root() {
+    local uid
+    uid="${EUID:-$(id -u)}"
+    if [[ "$uid" -ne 0 ]]; then
+        err "must run as root (try: sudo autoproxy-client ${SUBCOMMAND})"
+        exit 1
+    fi
+}
+
+detect_os() {
+    [[ -r /etc/os-release ]] || { err "cannot read /etc/os-release; unsupported system"; exit 1; }
+    local id version_id pretty
+    id=""
+    version_id=""
+    pretty=""
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    id="${ID:-}"
+    version_id="${VERSION_ID:-}"
+    pretty="${PRETTY_NAME:-${id} ${version_id}}"
+    OS_PRETTY="$pretty"
+    # Adding a platform later is one more case arm here (and in
+    # installers/install-vps.sh and installers/install-client.sh).
+    case "${id}:${version_id}" in
+        debian:12|debian:13)
+            : ;;
+        ubuntu:*)
+            err "Ubuntu is not supported in this release; Debian 12 or 13 only. Ubuntu support is tracked for a later release."
+            exit 1
+            ;;
+        *)
+            err "unsupported OS: ${pretty}. Pelican Auto Proxy supports Debian 12/13 only."
+            exit 1
+            ;;
+    esac
+}
+
+# --- base64url + minimal JSON (decode + config file read) -----------------
+#
+# The join code is a fixed, flat JSON object produced by our own VPS agent
+# (never arbitrary user JSON), so a full parser is not needed. python3, if
+# present, is used for both base64url decoding and field extraction because
+# it is exact; the bash fallback below is a minimal extractor for this one
+# schema, not a general JSON parser, and is documented as such so nobody
+# reaches for it expecting more.
+
+b64url_decode_bash() {
+    local code="$1" std len rem pad
+    std="$(printf '%s' "$code" | tr -- '-_' '+/')"
+    len=${#std}
+    rem=$(( len % 4 ))
+    case "$rem" in
+        2) pad='==' ;;
+        3) pad='=' ;;
+        0) pad='' ;;
+        *) err "join code has an invalid base64url length"; exit 1 ;;
+    esac
+    printf '%s%s' "$std" "$pad" | base64 -d 2>/dev/null || { err "join code is not valid base64url"; exit 1; }
+}
+
+# Returns "python3" or "bash", matching whichever decode_join_code/json_get
+# will actually use. Kept as its own function (not a side effect of
+# decode_join_code) because decode_join_code is always called through
+# command substitution ($(...)), which forks a subshell: any variable it
+# assigned internally would be lost when the subshell exits. Callers that
+# want to report the method must call this in their own shell, e.g.
+# DECODE_METHOD="$(decode_method)" right before or after decoding.
+decode_method() {
+    if [[ "$HAVE_PYTHON3" == "1" ]]; then
+        echo "python3"
+    else
+        echo "bash"
+    fi
+}
+
+decode_join_code() {
+    local code="$1"
+    if [[ "$HAVE_PYTHON3" == "1" ]]; then
+        python3 -c '
+import base64, sys
+code = sys.argv[1]
+pad = "=" * (-len(code) % 4)
+sys.stdout.write(base64.urlsafe_b64decode(code + pad).decode())
+' "$code" 2>/dev/null
+    else
+        b64url_decode_bash "$code"
+    fi
+}
+
+# Minimal extractor for the fixed, flat join-code/config schema: scalar
+# string/number fields plus one string array (lan_cidrs). Arrays are
+# returned as a comma-joined string so callers never need to branch on the
+# decode method.
+json_get_bash() {
+    local json="$1" key="$2" flat
+    flat="$(printf '%s' "$json" | tr -d '\n\r')"
+    if [[ "$flat" =~ \"$key\"[[:space:]]*:[[:space:]]*\[([^]]*)\] ]]; then
+        printf '%s' "${BASH_REMATCH[1]}" | tr -d '"[:space:]'
+        return 0
+    fi
+    if [[ "$flat" =~ \"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ "$flat" =~ \"$key\"[[:space:]]*:[[:space:]]*([0-9.eE+-]+) ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    printf ''
+}
+
+json_get() {
+    local json="$1" key="$2"
+    if [[ "$HAVE_PYTHON3" == "1" ]]; then
+        printf '%s' "$json" | python3 -c '
+import json, sys
+key = sys.argv[1]
+try:
+    obj = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+val = obj.get(key)
+if isinstance(val, list):
+    sys.stdout.write(",".join(str(v) for v in val))
+elif val is None:
+    sys.stdout.write("")
+else:
+    sys.stdout.write(str(val))
+' "$key"
+    else
+        json_get_bash "$json" "$key"
+    fi
+}
+
+# --- validation ------------------------------------------------------------
+
+validate_join_code() {
+    local v="$1" endpoint="$2" vps_wg_pubkey="$3" client_privkey="$4" client_address="$5" \
+        tunnel_subnet="$6" vps_tunnel_ip="$7" mode="$8" keepalive="$9"
+    local -a problems=()
+
+    [[ "$v" == "1" ]] || problems+=("unsupported join-code version '${v}' (expected 1)")
+    [[ "$mode" == "real" || "$mode" == "site" ]] || problems+=("mode must be 'real' or 'site', got '${mode}'")
+    [[ "$endpoint" =~ ^[^[:space:]]+:[0-9]+$ ]] || problems+=("endpoint '${endpoint}' is not host:port")
+    [[ -n "$vps_wg_pubkey" ]] || problems+=("vps_wg_pubkey is empty")
+    [[ -n "$client_privkey" ]] || problems+=("client_privkey is empty")
+    [[ "$client_address" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || problems+=("client_address '${client_address}' is not an IPv4 CIDR")
+    [[ "$tunnel_subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || problems+=("tunnel_subnet '${tunnel_subnet}' is not an IPv4 CIDR")
+    [[ "$vps_tunnel_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || problems+=("vps_tunnel_ip '${vps_tunnel_ip}' is not an IPv4 address")
+    [[ "$keepalive" =~ ^[0-9]+$ ]] || problems+=("keepalive '${keepalive}' is not a number")
+
+    if (( ${#problems[@]} > 0 )); then
+        err "the join code is invalid:"
+        local p
+        for p in "${problems[@]}"; do
+            printf '  - %s\n' "$p" >&2
+        done
+        exit 1
+    fi
+}
+
+# --- pure render functions (unit-tested via AUTOPROXY_RENDER_ONLY=1) -------
+
+# Renders /etc/autoproxy/client.json. mask is unused here (the file always
+# holds the real values, root-only 0600); kept for symmetry with
+# render_wg_conf's mask argument.
+render_client_json() {
+    local v="$1" endpoint="$2" vps_wg_pubkey="$3" client_privkey="$4" client_address="$5" \
+        tunnel_subnet="$6" vps_tunnel_ip="$7" mode="$8" keepalive="$9" \
+        lan_cidrs="${10}" host_ip="${11:-}"
+    local lan_json="[" first=1 item
+    if [[ -n "$lan_cidrs" ]]; then
+        local IFS=','
+        read -ra items <<<"$lan_cidrs"
+        unset IFS
+        for item in "${items[@]}"; do
+            if [[ $first -eq 1 ]]; then
+                lan_json+="\"${item}\""
+                first=0
+            else
+                lan_json+=",\"${item}\""
+            fi
+        done
+    fi
+    lan_json+="]"
+    cat <<EOF
+{
+  "v": ${v},
+  "endpoint": "${endpoint}",
+  "vps_wg_pubkey": "${vps_wg_pubkey}",
+  "client_privkey": "${client_privkey}",
+  "client_address": "${client_address}",
+  "tunnel_subnet": "${tunnel_subnet}",
+  "vps_tunnel_ip": "${vps_tunnel_ip}",
+  "mode": "${mode}",
+  "lan_cidrs": ${lan_json},
+  "keepalive": ${keepalive},
+  "host_ip": "${host_ip}"
+}
+EOF
+}
+
+# mask=1 replaces the private key with a placeholder, for printing to a
+# terminal or log; mask=0 (default) is what actually gets written to disk.
+render_wg_conf() {
+    local privkey="$1" address="$2" peer_pubkey="$3" endpoint="$4" keepalive="$5" mask="${6:-0}"
+    local shown_key="$privkey"
+    [[ "$mask" == "1" ]] && shown_key="****(masked)****"
+    cat <<EOF
+[Interface]
+PrivateKey = ${shown_key}
+Address = ${address}
+Table = off
+
+[Peer]
+PublicKey = ${peer_pubkey}
+Endpoint = ${endpoint}
+# AllowedIPs is 0.0.0.0/0 in both real and site mode. Real mode needs it so
+# cryptokey routing accepts packets from any player source address; site
+# mode needs it too, because the VPS DNATs proxied traffic (keeping the
+# player's source IP) straight to a LAN target through this tunnel, so a
+# narrower AllowedIPs would silently drop that traffic as well.
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = ${keepalive}
+EOF
+}
+
+# Renders the client-side nftables ruleset on interface autoproxy0.
+#
+# The masquerade chain is rendered ONLY in site mode, and only for the LAN
+# ranges this peer was actually given. It used to be rendered in both modes,
+# on the assumption that real-mode traffic is delivered to a local address
+# and never reaches postrouting. That is false on exactly the host this
+# project exists for: a Wings host delivers the game port to a container, so
+# the packet is forwarded across a bridge and does hit postrouting. Excluding
+# bridges by name ("docker*", "br-*") did not save it either, because Wings
+# names its own bridge "pelican0". The result was a masquerade to the bridge
+# gateway and the player's address replaced by 172.x.x.1 - the one thing real
+# mode promises not to do. Matching the destination instead of an interface
+# name cannot be defeated by somebody renaming a bridge.
+#
+# host_ip, when set, adds the --host-ip fallback chain (README:
+# "allocations bound to the LAN IP").
+render_nft() {
+    local tunnel_subnet="$1" vps_tunnel_ip="${2:-}" host_ip="${3:-}" lan_cidrs="${4:-}"
+    local lan_set=""
+
+    if [[ -n "$lan_cidrs" ]]; then
+        lan_set="$(printf '%s' "$lan_cidrs" | tr -d '[:space:]' | sed 's/,/, /g')"
+    fi
+
+    cat <<EOF
+table inet autoproxy_client {
+    chain mark_in {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "${IFACE}" ct state new ct mark set ${FWMARK}
+    }
+
+    chain restore_fwd {
+        type filter hook prerouting priority mangle; policy accept;
+        ct direction reply ct mark ${FWMARK} meta mark set ct mark
+    }
+
+    chain restore_out {
+        type route hook output priority mangle; policy accept;
+        ct direction reply ct mark ${FWMARK} meta mark set ct mark
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "${IFACE}" accept
+        ct state established,related accept
+    }
+EOF
+    if [[ -n "$lan_set" ]]; then
+        cat <<EOF
+
+    # Site mode only. The LAN hosts this peer forwards to have no route back
+    # into the tunnel, so their replies must come from this machine: that is
+    # the shared-IP trade-off site mode is documented to make. Restricted to
+    # the peer's own LAN ranges, so traffic delivered to a container on this
+    # host is never touched and keeps the player's real address.
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        iifname "${IFACE}" oifname != "${IFACE}" ip daddr != ${tunnel_subnet} ip daddr { ${lan_set} } masquerade
+    }
+EOF
+    fi
+    if [[ -n "$host_ip" ]]; then
+        cat <<EOF
+
+    # --host-ip fallback (install option): use when this host's allocations
+    # are bound to the LAN IP instead of 0.0.0.0, so Docker/Wings never sees
+    # a packet with dst = tunnel IP to begin with.
+    chain dnat_hostip {
+        type nat hook prerouting priority -101; policy accept;
+        ip daddr ${vps_tunnel_ip} meta l4proto { tcp, udp } dnat to ${host_ip}
+    }
+EOF
+    fi
+    echo "}"
+}
+
+# --- config read/write -------------------------------------------------
+
+write_config_from_code() {
+    local code="$1" host_ip="${2:-}"
+    local json v endpoint vps_wg_pubkey client_privkey client_address tunnel_subnet
+    local vps_tunnel_ip mode keepalive lan_cidrs
+
+    DECODE_METHOD="$(decode_method)"
+    json="$(decode_join_code "$code")"
+    [[ -n "$json" ]] || { err "could not decode the join code (method: ${DECODE_METHOD})"; exit 1; }
+
+    v="$(json_get "$json" v)"
+    endpoint="$(json_get "$json" endpoint)"
+    vps_wg_pubkey="$(json_get "$json" vps_wg_pubkey)"
+    client_privkey="$(json_get "$json" client_privkey)"
+    client_address="$(json_get "$json" client_address)"
+    tunnel_subnet="$(json_get "$json" tunnel_subnet)"
+    vps_tunnel_ip="$(json_get "$json" vps_tunnel_ip)"
+    mode="$(json_get "$json" mode)"
+    keepalive="$(json_get "$json" keepalive)"
+    # No "name": the agent's join code does not carry one. Its fields are
+    # exactly v, endpoint, vps_wg_pubkey, client_privkey, client_address,
+    # tunnel_subnet, vps_tunnel_ip, mode, lan_cidrs and keepalive.
+    lan_cidrs="$(json_get "$json" lan_cidrs)"
+
+    validate_join_code "$v" "$endpoint" "$vps_wg_pubkey" "$client_privkey" "$client_address" \
+        "$tunnel_subnet" "$vps_tunnel_ip" "$mode" "$keepalive"
+
+    mkdir -p "$CONF_DIR" "$WG_CONF_DIR"
+    umask 077
+
+    render_client_json "$v" "$endpoint" "$vps_wg_pubkey" "$client_privkey" "$client_address" \
+        "$tunnel_subnet" "$vps_tunnel_ip" "$mode" "$keepalive" "$lan_cidrs" "$host_ip" >"$CONF_FILE"
+    chmod 0600 "$CONF_FILE"
+
+    render_wg_conf "$client_privkey" "$client_address" "$vps_wg_pubkey" "$endpoint" "$keepalive" 0 >"$WG_CONF_FILE"
+    chmod 0600 "$WG_CONF_FILE"
+
+    log "wrote ${CONF_FILE} and ${WG_CONF_FILE} (mode 0600, decoded with ${DECODE_METHOD})"
+}
+
+load_config() {
+    [[ -f "$CONF_FILE" ]] || { err "no config at ${CONF_FILE}; run 'autoproxy-client install <join-code>' first"; exit 1; }
+    load_config_fields
+}
+
+# Same field extraction as load_config, but returns 1 instead of exiting
+# when the config is missing, for read-only callers like status that must
+# still report cleanly on a host that was never installed.
+load_config_soft() {
+    [[ -f "$CONF_FILE" ]] || return 1
+    load_config_fields
+}
+
+load_config_fields() {
+    local json
+    json="$(cat "$CONF_FILE")"
+    ENDPOINT="$(json_get "$json" endpoint)"
+    VPS_WG_PUBKEY="$(json_get "$json" vps_wg_pubkey)"
+    CLIENT_ADDRESS="$(json_get "$json" client_address)"
+    TUNNEL_SUBNET="$(json_get "$json" tunnel_subnet)"
+    VPS_TUNNEL_IP="$(json_get "$json" vps_tunnel_ip)"
+    MODE="$(json_get "$json" mode)"
+    KEEPALIVE="$(json_get "$json" keepalive)"
+    LAN_CIDRS="$(json_get "$json" lan_cidrs)"
+    HOST_IP="$(json_get "$json" host_ip)"
+}
+
+# --- network apply/teardown (never run on the dev host; see CLAUDE.md #4) -
+
+apply_sysctls() {
+    cat >"$SYSCTL_FILE" <<EOF
+# Managed by autoproxy-client. Re-run "autoproxy-client up" instead of
+# editing this by hand.
+net.ipv4.ip_forward = 1
+net.ipv4.conf.${IFACE}.rp_filter = 2
+EOF
+    chmod 0644 "$SYSCTL_FILE"
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || warn "could not set net.ipv4.ip_forward=1 live (sysctl -w failed)"
+    sysctl -w "net.ipv4.conf.${IFACE}.rp_filter=2" >/dev/null 2>&1 || warn "could not set net.ipv4.conf.${IFACE}.rp_filter=2 live (sysctl -w failed)"
+
+    local got
+    got="$(cat "/proc/sys/net/ipv4/conf/${IFACE}/rp_filter" 2>/dev/null || echo unknown)"
+    if [[ "$got" != "2" ]]; then
+        warn "net.ipv4.conf.${IFACE}.rp_filter reads '${got}', not 2. Note this is not explained by a global"
+        warn "net.ipv4.conf.all.rp_filter=1: Linux takes max(all, interface), so the interface value of 2 always"
+        warn "wins there. Something else (cloud-init, another tool) is resetting it; investigate."
+    fi
+}
+
+ensure_docker_user_rules() {
+    if ! nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
+        if command -v docker >/dev/null 2>&1; then
+            warn "Docker is installed but chain 'ip filter DOCKER-USER' does not exist (nftables backend?)."
+            warn "This path is untested; verify forwarding reaches containers manually."
+        else
+            log "chain ip filter DOCKER-USER not present (Docker not detected); nothing to do"
+        fi
+        return 0
+    fi
+    if nft list chain ip filter DOCKER-USER | grep -q "iifname \"${IFACE}\""; then
+        log "DOCKER-USER already allows ${IFACE}"
+        return 0
+    fi
+    nft insert rule ip filter DOCKER-USER iifname "${IFACE}" counter accept
+    nft insert rule ip filter DOCKER-USER oifname "${IFACE}" counter accept
+    log "inserted DOCKER-USER accept rules for ${IFACE}"
+}
+
+# True when the live interface already carries exactly the configuration in
+# autoproxy0.conf: same private key, same single peer, same endpoint, same
+# keepalive. Used to decide whether "up" needs to touch WireGuard at all,
+# because touching it at all costs every player their connection for a
+# rekey (see the comment in cmd_up).
+tunnel_config_matches() {
+    local stripped conf_key conf_peer conf_endpoint conf_keepalive
+    local live_key live_peer live_endpoint live_keepalive
+
+    stripped="$(wg-quick strip "$IFACE" 2>/dev/null)" || return 1
+    [[ -n "$stripped" ]] || return 1
+
+    conf_key="$(printf '%s\n' "$stripped" | sed -n 's/^[[:space:]]*PrivateKey[[:space:]]*=[[:space:]]*//p' | head -n1)"
+    conf_peer="$(printf '%s\n' "$stripped" | sed -n 's/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*//p' | head -n1)"
+    conf_endpoint="$(printf '%s\n' "$stripped" | sed -n 's/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*//p' | head -n1)"
+    conf_keepalive="$(printf '%s\n' "$stripped" | sed -n 's/^[[:space:]]*PersistentKeepalive[[:space:]]*=[[:space:]]*//p' | head -n1)"
+
+    live_key="$(wg show "$IFACE" private-key 2>/dev/null)" || return 1
+    live_peer="$(wg show "$IFACE" peers 2>/dev/null | head -n1)" || return 1
+    live_endpoint="$(wg show "$IFACE" endpoints 2>/dev/null | awk 'NR==1 {print $2}')"
+    live_keepalive="$(wg show "$IFACE" persistent-keepalive 2>/dev/null | awk 'NR==1 {print $2}')"
+
+    # "(none)" is what wg prints for an interface with no key at all.
+    [[ -n "$live_key" && "$live_key" != "(none)" ]] || return 1
+    [[ "$live_key" == "$conf_key" ]] || return 1
+    [[ -n "$conf_peer" && "$live_peer" == "$conf_peer" ]] || return 1
+    [[ "$live_endpoint" == "$conf_endpoint" ]] || return 1
+    [[ "$live_keepalive" == "$conf_keepalive" ]] || return 1
+
+    return 0
+}
+
+cmd_up() {
+    need_root
+    load_config
+
+    modprobe wireguard >/dev/null 2>&1 || warn "modprobe wireguard failed; continuing (module may be built-in or already loaded)"
+
+    if ip link show "$IFACE" >/dev/null 2>&1; then
+        log "${IFACE} already exists; syncing configuration"
+
+        # Only sync when something actually differs. Handing the kernel a
+        # private key wipes every live session even when it is byte-for-byte
+        # the key the interface already holds - the session secrets are
+        # derived from it, so it always rekeys - and that turned every
+        # "systemctl restart autoproxy-client" into roughly 15 to 30 seconds
+        # of dead traffic, long enough to drop players, which is the opposite
+        # of what restarting this service is documented to do.
+        #
+        # The fix is to skip the sync, not to sync without the key: a config
+        # with no PrivateKey line does not mean "leave the key alone" to
+        # wireguard, it means "this interface has no key", and syncconf
+        # duly clears it, leaving a tunnel that can never handshake again.
+        # (Found the hard way; the interface reports public key "(none)".)
+        if tunnel_config_matches; then
+            log "tunnel configuration already matches; leaving the live session untouched"
+        else
+            log "tunnel configuration changed; applying it (this rekeys the tunnel)"
+            if ! wg syncconf "$IFACE" <(wg-quick strip "$IFACE"); then
+                err "wg syncconf failed on an existing ${IFACE}; check 'wg-quick strip ${IFACE}' output"
+                exit 1
+            fi
+        fi
+        ip -4 addr replace "$CLIENT_ADDRESS" dev "$IFACE"
+        ip link set "$IFACE" up
+    else
+        local add_err
+        if ! add_err="$(ip link add "$IFACE" type wireguard 2>&1)"; then
+            if ip link add dev __autoproxy_probe type wireguard >/dev/null 2>&1; then
+                ip link delete __autoproxy_probe >/dev/null 2>&1 || true
+                err "could not create ${IFACE}: ${add_err}"
+            else
+                err "kernel WireGuard support is unavailable here (need modprobe wireguard + CAP_NET_ADMIN;"
+                err "in Docker: cap_add: NET_ADMIN)."
+            fi
+            exit 1
+        fi
+        wg setconf "$IFACE" "$WG_CONF_FILE"
+        ip -4 addr add "$CLIENT_ADDRESS" dev "$IFACE"
+        ip link set "$IFACE" up
+        log "${IFACE} is up (${CLIENT_ADDRESS})"
+    fi
+
+    ip route replace "${VPS_TUNNEL_IP}/32" dev "$IFACE"
+
+    if ! ip rule show | grep -q "fwmark ${FWMARK} lookup ${RT_TABLE}"; then
+        ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" priority "$RT_PRIORITY"
+        log "added ip rule: fwmark ${FWMARK} lookup ${RT_TABLE} priority ${RT_PRIORITY}"
+    fi
+    ip route replace default dev "$IFACE" table "$RT_TABLE"
+
+    apply_sysctls
+
+    local rendered
+    rendered="$(render_nft "$TUNNEL_SUBNET" "$VPS_TUNNEL_IP" "$HOST_IP" "$LAN_CIDRS")"
+    nft delete table inet autoproxy_client >/dev/null 2>&1 || true
+    if ! printf '%s\n' "$rendered" | nft -f -; then
+        err "failed to apply nft table inet autoproxy_client"
+        exit 1
+    fi
+    log "applied nft table inet autoproxy_client"
+
+    ensure_docker_user_rules
+    log "up: complete"
+}
+
+teardown_network() {
+    nft delete table inet autoproxy_client >/dev/null 2>&1 || true
+
+    local handle
+    while handle="$(nft -a list chain ip filter DOCKER-USER 2>/dev/null \
+            | grep -E "iifname \"${IFACE}\"|oifname \"${IFACE}\"" \
+            | grep -oE 'handle [0-9]+' | awk '{print $2}' | head -n1)"; [[ -n "$handle" ]]; do
+        nft delete rule ip filter DOCKER-USER handle "$handle" 2>/dev/null || break
+    done
+
+    if ip rule show 2>/dev/null | grep -q "fwmark ${FWMARK} lookup ${RT_TABLE}"; then
+        ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" priority "$RT_PRIORITY" 2>/dev/null || true
+    fi
+    ip route flush table "$RT_TABLE" >/dev/null 2>&1 || true
+
+    if ip link show "$IFACE" >/dev/null 2>&1; then
+        ip link delete "$IFACE" >/dev/null 2>&1 || true
+    fi
+    log "network teardown complete"
+}
+
+cmd_down() {
+    teardown_network
+}
+
+# --- run (systemd ExecStart / Docker entrypoint) ---------------------------
+
+cmd_run() {
+    if [[ ! -f "$CONF_FILE" ]]; then
+        if [[ -n "${AUTOPROXY_JOIN_CODE:-}" ]]; then
+            log "container mode: no config on disk, writing it from AUTOPROXY_JOIN_CODE"
+            write_config_from_code "$AUTOPROXY_JOIN_CODE" "${AUTOPROXY_HOST_IP:-}"
+        else
+            err "no config at ${CONF_FILE} and AUTOPROXY_JOIN_CODE is not set;"
+            err "run 'autoproxy-client install <join-code>' first (or set AUTOPROXY_JOIN_CODE in the container)"
+            exit 1
+        fi
+    fi
+
+    # Players survive a restart: SIGTERM stops this loop but leaves the
+    # tunnel, routes and nft table exactly as they are.
+    trap 'log "SIGTERM received: leaving the tunnel up so players survive this restart"; exit 0' TERM INT
+
+    cmd_up
+
+    local start_ts now hs_raw age transfer
+    start_ts=$(date +%s)
+    while true; do
+        sleep "$LOG_INTERVAL" &
+        wait "$!" || true
+
+        now=$(date +%s)
+        hs_raw="$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}' || true)"
+        if [[ -z "${hs_raw:-}" || "$hs_raw" == "0" ]]; then
+            age=$(( now - start_ts ))
+            log "no handshake yet (${age}s since start)"
+        else
+            age=$(( now - hs_raw ))
+            log "handshake age ${age}s"
+        fi
+
+        if (( age >= STALE_SECONDS )); then
+            err "no handshake within ${STALE_SECONDS}s; exiting so the service manager restarts us"
+            exit 1
+        fi
+
+        transfer="$(wg_transfer_human)"
+        log "transfer: ${transfer:-n/a}"
+    done
+}
+
+# "wg show <iface> transfer" prints "<peer pubkey>\t<rx>\t<tx>", which is not
+# what anybody wants to read in a status line - and printing the peer's public
+# key next to the word "transfer" reads like a leak even though it is public.
+# One peer per client, so summarise the counters and drop the key column.
+wg_transfer_human() {
+    wg show "$IFACE" transfer 2>/dev/null | awk '
+        NF >= 3 { rx += $(NF-1); tx += $NF }
+        END { if (rx == "" && tx == "") exit 1; printf "%s bytes received, %s bytes sent", rx + 0, tx + 0 }
+    ' || true
+}
+
+# --- status ------------------------------------------------------------
+
+cmd_status() {
+    local json=0
+    for a in "$@"; do [[ "$a" == "--json" ]] && json=1; done
+
+    local configured=0
+    load_config_soft && configured=1
+
+    local iface_up=0 hs_raw="" hs_age="null" transfer="" nft_ok=0 rule_ok=0 docker_state="n/a"
+    local fwd rp
+
+    if ip link show "$IFACE" >/dev/null 2>&1; then
+        iface_up=1
+        hs_raw="$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}' || true)"
+        if [[ -n "${hs_raw:-}" && "$hs_raw" != "0" ]]; then
+            hs_age=$(( $(date +%s) - hs_raw ))
+        fi
+        transfer="$(wg_transfer_human)"
+    fi
+
+    nft list table inet autoproxy_client >/dev/null 2>&1 && nft_ok=1
+    ip rule show 2>/dev/null | grep -q "fwmark ${FWMARK} lookup ${RT_TABLE}" && rule_ok=1
+
+    if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
+        if nft list chain ip filter DOCKER-USER 2>/dev/null | grep -q "\"${IFACE}\""; then
+            docker_state="present"
+        else
+            docker_state="missing"
+        fi
+    fi
+
+    fwd="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo unknown)"
+    rp="$(cat "/proc/sys/net/ipv4/conf/${IFACE}/rp_filter" 2>/dev/null || echo unknown)"
+
+    local healthy=0
+    if [[ $iface_up -eq 1 && $nft_ok -eq 1 && $rule_ok -eq 1 && "$hs_age" != "null" ]] && (( hs_age < STALE_SECONDS )); then
+        healthy=1
+    fi
+
+    if [[ $json -eq 1 ]]; then
+        printf '{"configured":%s,"mode":"%s","endpoint":"%s","keepalive":"%s","interface":"%s","interface_up":%s,"handshake_age_seconds":%s,"transfer":"%s","nft_table":%s,"ip_rule":%s,"docker_user":"%s","ip_forward":"%s","rp_filter":"%s","healthy":%s}\n' \
+            "$([[ $configured -eq 1 ]] && echo true || echo false)" \
+            "$MODE" "$ENDPOINT" "$KEEPALIVE" \
+            "$IFACE" \
+            "$([[ $iface_up -eq 1 ]] && echo true || echo false)" \
+            "$hs_age" \
+            "$transfer" \
+            "$([[ $nft_ok -eq 1 ]] && echo true || echo false)" \
+            "$([[ $rule_ok -eq 1 ]] && echo true || echo false)" \
+            "$docker_state" "$fwd" "$rp" \
+            "$([[ $healthy -eq 1 ]] && echo true || echo false)"
+    else
+        if [[ $configured -eq 1 ]]; then
+            echo "mode:         ${MODE} (peer ${ENDPOINT}, keepalive ${KEEPALIVE}s)"
+            echo "peer pubkey:  ${VPS_WG_PUBKEY}"
+        else
+            echo "mode:         not installed (no ${CONF_FILE})"
+        fi
+        echo "interface:    ${IFACE} ($( [[ $iface_up -eq 1 ]] && echo up || echo absent ))"
+        echo "handshake:    $( [[ "$hs_age" == "null" ]] && echo never || echo "${hs_age}s ago" )"
+        echo "transfer:     ${transfer:-n/a}"
+        echo "nft table:    $( [[ $nft_ok -eq 1 ]] && echo present || echo missing )"
+        echo "ip rule:      $( [[ $rule_ok -eq 1 ]] && echo present || echo missing )"
+        echo "DOCKER-USER:  ${docker_state}"
+        echo "ip_forward:   ${fwd}"
+        echo "rp_filter:    ${rp}"
+        echo "healthy:      $( [[ $healthy -eq 1 ]] && echo yes || echo no )"
+    fi
+
+    [[ $healthy -eq 1 ]] && return 0 || return 1
+}
+
+# --- install / uninstall -------------------------------------------------
+
+install_self() {
+    local src
+    src="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    if [[ "$src" == "$BIN_PATH" ]]; then
+        chmod 0755 "$BIN_PATH"
+        return 0
+    fi
+    if [[ ! -f "$src" ]]; then
+        warn "cannot locate this script's source (${0}) to install it to ${BIN_PATH}; leaving any existing copy in place"
+        return 0
+    fi
+    mkdir -p "$(dirname "$BIN_PATH")"
+    cp -f "$src" "$BIN_PATH"
+    chmod 0755 "$BIN_PATH"
+    log "installed ${BIN_PATH}"
+}
+
+install_unit_file() {
+    mkdir -p "$(dirname "$UNIT_PATH")"
+    cat >"$UNIT_PATH" <<'EOF'
+[Unit]
+Description=Pelican Auto Proxy tunnel client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/autoproxy-client run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    log "installed ${UNIT_PATH}"
+}
+
+print_install_summary() {
+    local host_ip="${1:-}"
+    cat <<EOF
+
+--------------------------------------------------------------
+ Pelican Auto Proxy client installed
+--------------------------------------------------------------
+ Changed on this machine:
+   - ${CONF_FILE} (0600)
+   - ${WG_CONF_FILE} (0600)
+   - ${BIN_PATH}
+   - ${UNIT_PATH}
+   - ${SYSCTL_FILE}
+   - interface ${IFACE}, nft table inet autoproxy_client, one ip rule/route,
+     and DOCKER-USER accept rules if Docker's iptables backend is present
+EOF
+    [[ -n "$host_ip" ]] && echo "   - DNAT fallback: tunnel IP -> ${host_ip} (--host-ip)"
+    cat <<EOF
+
+ Check it:
+   autoproxy-client status
+
+ Undo it:
+   autoproxy-client uninstall
+--------------------------------------------------------------
+EOF
+}
+
+cmd_install() {
+    local code="" yes=0 no_start=0 host_ip=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --yes) yes=1 ;;
+            --no-start) no_start=1 ;;
+            --host-ip)
+                shift
+                host_ip="${1:-}"
+                [[ -n "$host_ip" ]] || { err "--host-ip needs a value"; exit 2; }
+                ;;
+            --*)
+                err "unknown install option: $1"
+                exit 2
+                ;;
+            *)
+                if [[ -n "$code" ]]; then
+                    err "unexpected extra argument: $1"
+                    exit 2
+                fi
+                code="$1"
+                ;;
+        esac
+        shift
+    done
+    [[ -n "$code" ]] || { err "usage: autoproxy-client install <join-code> [--yes] [--no-start] [--host-ip <lan-ip>]"; exit 2; }
+
+    need_root
+    detect_os
+
+    if [[ $yes -ne 1 && -t 0 ]]; then
+        local reply
+        read -r -p "Install Pelican Auto Proxy client on this ${OS_PRETTY}? [y/N] " reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { log "aborted"; exit 0; }
+    fi
+
+    log "installing packages: wireguard-tools nftables curl iproute2"
+    apt-get update -y
+    # --no-install-recommends: Debian/Ubuntu kernels already build WireGuard
+    # in (or as a loadable module); without this flag, wireguard-tools pulls
+    # in a full kernel image + initramfs-tools as "Recommends", which is
+    # both unnecessary and, in a container test image with no real /boot,
+    # fails its postinst outright.
+    apt-get install -y --no-install-recommends wireguard-tools nftables curl iproute2
+
+    write_config_from_code "$code" "$host_ip"
+
+    install_self
+    install_unit_file
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload
+
+    if [[ $no_start -eq 1 ]]; then
+        command -v systemctl >/dev/null 2>&1 && systemctl enable autoproxy-client.service
+        log "installed but not started (--no-start); run 'systemctl start autoproxy-client' when ready"
+    else
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable --now autoproxy-client.service
+        else
+            warn "systemctl not found; start the tunnel with 'autoproxy-client run'"
+        fi
+    fi
+
+    print_install_summary "$host_ip"
+}
+
+cmd_uninstall() {
+    local yes=0
+    for a in "$@"; do [[ "$a" == "--yes" ]] && yes=1; done
+
+    need_root
+    cat <<EOF
+This will remove:
+  - ${CONF_FILE}
+  - ${WG_CONF_FILE}
+  - ${BIN_PATH}
+  - ${UNIT_PATH} (and stop/disable the service)
+  - ${SYSCTL_FILE}
+  - the ${IFACE} interface, its nft table, the ip rule/route, and any
+    DOCKER-USER rules it added
+
+apt packages (wireguard-tools, nftables, curl, iproute2) are left installed.
+EOF
+
+    if [[ $yes -ne 1 ]]; then
+        if [[ -t 0 ]]; then
+            local reply
+            read -r -p "Continue? [y/N] " reply
+            [[ "$reply" =~ ^[Yy]$ ]] || { log "aborted"; exit 0; }
+        else
+            err "refusing to uninstall without --yes (no terminal attached)"
+            exit 1
+        fi
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now autoproxy-client.service 2>/dev/null || true
+    fi
+    teardown_network
+    rm -f "$UNIT_PATH" "$CONF_FILE" "$WG_CONF_FILE" "$SYSCTL_FILE"
+    rmdir "$CONF_DIR" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$BIN_PATH"
+
+    cat <<EOF
+uninstall complete.
+
+Remaining on this system:
+  - apt packages: wireguard-tools nftables curl iproute2 (not removed;
+    "apt-get remove wireguard-tools nftables" if you want those gone too)
+  - net.ipv4.ip_forward and net.ipv4.conf.*.rp_filter keep their current
+    live kernel value until reboot; only the persistence file was removed
+EOF
+}
+
+cmd_version() {
+    echo "autoproxy-client ${AUTOPROXY_VERSION}"
+}
+
+usage() {
+    cat <<'EOF'
+usage: autoproxy-client <command> [options]
+
+commands:
+  install <join-code> [--yes] [--no-start] [--host-ip <lan-ip>]
+  up                     bring the tunnel and firewall rules up (idempotent)
+  run                    up, then log health forever (systemd/Docker ExecStart)
+  status [--json]        exit 0 if healthy, 1 otherwise
+  down                   tear down everything up/run created
+  uninstall [--yes]      remove files, unit, sysctl config and network state
+  version
+EOF
+}
+
+# --- entrypoint ------------------------------------------------------------
+
+main() {
+    HAVE_PYTHON3=0
+    command -v python3 >/dev/null 2>&1 && HAVE_PYTHON3=1
+
+    local sub="${1:-}"
+    (( $# > 0 )) && shift
+    SUBCOMMAND="${sub:-<command>}"
+
+    case "$sub" in
+        install) cmd_install "$@" ;;
+        up) need_root; cmd_up ;;
+        run) cmd_run ;;
+        status) cmd_status "$@" ;;
+        down) need_root; cmd_down ;;
+        uninstall) cmd_uninstall "$@" ;;
+        version) cmd_version ;;
+        ""|-h|--help) usage ;;
+        *)
+            err "unknown subcommand: ${sub}"
+            usage
+            exit 2
+            ;;
+    esac
+}
+
+# Allow client/tests/test-render.sh to source this file and call the pure
+# render_*/decode_join_code/json_get/validate_join_code functions directly,
+# without executing main() or requiring root/network access.
+if [[ "${AUTOPROXY_RENDER_ONLY:-0}" != "1" ]]; then
+    main "$@"
+fi

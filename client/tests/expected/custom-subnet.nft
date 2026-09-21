@@ -1,0 +1,22 @@
+table inet autoproxy_client {
+    chain mark_in {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "autoproxy0" ct state new ct mark set 0x2a
+    }
+
+    chain restore_fwd {
+        type filter hook prerouting priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain restore_out {
+        type route hook output priority mangle; policy accept;
+        ct direction reply ct mark 0x2a meta mark set ct mark
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "autoproxy0" accept
+        ct state established,related accept
+    }
+}
