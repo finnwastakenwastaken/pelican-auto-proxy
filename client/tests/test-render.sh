@@ -56,7 +56,7 @@ check "custom-subnet.nft (variable substitution)" \
     "$expected_dir/custom-subnet.nft"
 
 check "host-ip.nft (--host-ip fallback chain)" \
-    "$(render_nft "10.66.66.0/24" "10.66.66.1" "198.51.100.20")" \
+    "$(render_nft "10.66.66.0/24" "10.66.66.1" "198.51.100.20" "" "10.66.66.2")" \
     "$expected_dir/host-ip.nft"
 
 # Site mode renders the masquerade chain, scoped to this peer's LAN ranges.

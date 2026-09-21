@@ -8,7 +8,7 @@
     "panels": ["admin"],
     "api_version": 1,
     "composer_packages": null,
-    "version": "0.2.2",
+    "version": "0.2.3",
     "url": "https://github.com/finnwastakenwastaken/pelican-auto-proxy",
     "update_url": "https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/update.json",
     "panel_version": "^1.0.0-beta38",

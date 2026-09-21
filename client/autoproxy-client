@@ -312,7 +312,7 @@ EOF
 # host_ip, when set, adds the --host-ip fallback chain (README:
 # "allocations bound to the LAN IP").
 render_nft() {
-    local tunnel_subnet="$1" vps_tunnel_ip="${2:-}" host_ip="${3:-}" lan_cidrs="${4:-}"
+    local tunnel_subnet="$1" vps_tunnel_ip="${2:-}" host_ip="${3:-}" lan_cidrs="${4:-}" client_ip="${5:-}"
     local lan_set=""
 
     if [[ -n "$lan_cidrs" ]]; then
@@ -361,10 +361,13 @@ EOF
 
     # --host-ip fallback (install option): use when this host's allocations
     # are bound to the LAN IP instead of 0.0.0.0, so Docker/Wings never sees
-    # a packet with dst = tunnel IP to begin with.
+    # a packet with dst = tunnel IP to begin with. The VPS sends forwarded
+    # traffic to THIS machine's tunnel address (client_ip), never to its own,
+    # so that is the address to rewrite. (0.2.2 matched the VPS's address and
+    # therefore never fired; found on a live node.)
     chain dnat_hostip {
         type nat hook prerouting priority -101; policy accept;
-        ip daddr ${vps_tunnel_ip} meta l4proto { tcp, udp } dnat to ${host_ip}
+        ip daddr ${client_ip} meta l4proto { tcp, udp } dnat to ${host_ip}
     }
 EOF
     fi
@@ -574,7 +577,7 @@ cmd_up() {
     apply_sysctls
 
     local rendered
-    rendered="$(render_nft "$TUNNEL_SUBNET" "$VPS_TUNNEL_IP" "$HOST_IP" "$LAN_CIDRS")"
+    rendered="$(render_nft "$TUNNEL_SUBNET" "$VPS_TUNNEL_IP" "$HOST_IP" "$LAN_CIDRS" "${CLIENT_ADDRESS%/*}")"
     nft delete table inet autoproxy_client >/dev/null 2>&1 || true
     if ! printf '%s\n' "$rendered" | nft -f -; then
         err "failed to apply nft table inet autoproxy_client"

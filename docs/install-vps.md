@@ -21,6 +21,9 @@ node host dials into.
 curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-vps.sh | sudo bash
 ```
 
+A minimal Debian image may have no `curl`. If the command above says `curl: command not found`, run
+`sudo apt-get install -y curl ca-certificates` once and repeat it.
+
 This downloads the pinned release's `autoproxy-agent` binary, verifies its checksum against `SHA256SUMS`, and runs
 `autoproxy-agent setup`. Setup is idempotent — re-running it never regenerates an existing token, certificate or
 WireGuard key, but it does refresh derived config (the systemd units, the base nftables table) so a changed flag

@@ -1,7 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
-  <title id="t">Pelican Auto Proxy mark, single colour for light backgrounds</title>
-  <g fill="#0b0f19" stroke="#0b0f19">
-    <path d="M192.2 199.3A96 96 0 1 1 221.2 104.8" fill="none" stroke-width="18" stroke-linecap="round"/>
-    <path stroke="none" fill-rule="evenodd" d="M77 137A40 40 0 1 1 137 85C172 90 206 118 236 154C230 180 208 192 180 190C152 188 130 172 124 152A40 40 0 0 1 77 137ZM117 99A7 7 0 1 0 131 99A7 7 0 1 0 117 99Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="tt">
+  <title id="tt">Pelican Auto Proxy mark, one colour for light backgrounds</title>
+  <g fill="#0b0f19">
+    <path d="M184.4 205.7A96 96 0 1 1 221.2 104.8" fill="none" stroke="#0b0f19" stroke-width="18" stroke-linecap="round"/>
+    <path d="M134 129C170 140 202 149 230 156C226 178 204 190 175 188C148 186 127 172 121 152C123 143 127 135 134 129Z"/>
+    <path d="M131 118C170 130 206 140 240 148C206 118 168 92 123 79A34 34 0 1 0 131 118ZM107.5 94A6.5 6.5 0 1 0 120.5 94A6.5 6.5 0 1 0 107.5 94Z" fill-rule="evenodd"/>
   </g>
 </svg>

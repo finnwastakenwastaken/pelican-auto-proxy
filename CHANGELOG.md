@@ -4,6 +4,19 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.3] - 2026-09-21
+
+Found while moving a real deployment onto the proxy. The plugin is unchanged; the version moves with the tag.
+
+- Client: `--host-ip` never worked. Its rewrite rule matched the VPS's tunnel address instead of this machine's, so
+  a game server bound to the node's LAN address was unreachable through the proxy while everything bound to
+  `0.0.0.0` worked. The rule now matches the node's own tunnel address; the render test's golden file was wrong in
+  the same way and is corrected.
+- Quickstart and VPS install page: a minimal Debian image has no `curl`; the one-line install needs
+  `apt-get install -y curl ca-certificates` first. Said so.
+
 - Docs: screenshots of the Setup, Status, Forwards, manual-forward and Plugins pages, and of a node's Allocations tab, in the README, quickstart, plugin and updating pages.
 - Quickstart: the five-minute figure now cites a first-time run (under five minutes, 2026-09-21) instead of a maintainer's rehearsal.
 

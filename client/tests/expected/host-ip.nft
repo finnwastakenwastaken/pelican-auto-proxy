@@ -22,9 +22,12 @@ table inet autoproxy_client {
 
     # --host-ip fallback (install option): use when this host's allocations
     # are bound to the LAN IP instead of 0.0.0.0, so Docker/Wings never sees
-    # a packet with dst = tunnel IP to begin with.
+    # a packet with dst = tunnel IP to begin with. The VPS sends forwarded
+    # traffic to THIS machine's tunnel address (client_ip), never to its own,
+    # so that is the address to rewrite. (0.2.2 matched the VPS's address and
+    # therefore never fired; found on a live node.)
     chain dnat_hostip {
         type nat hook prerouting priority -101; policy accept;
-        ip daddr 10.66.66.1 meta l4proto { tcp, udp } dnat to 198.51.100.20
+        ip daddr 10.66.66.2 meta l4proto { tcp, udp } dnat to 198.51.100.20
     }
 }

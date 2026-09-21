@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="tt">
+  <title id="tt">Pelican Auto Proxy</title>
+  <rect x="0.5" y="0.5" width="1199" height="299" rx="16" fill="#0b0f19" stroke="#1f2937"/>
+  <g transform="translate(58 42) scale(0.83)">
+    <path d="M184.4 205.7A96 96 0 1 1 221.2 104.8" fill="none" stroke="#c8262c" stroke-width="18" stroke-linecap="round"/>
+    <path d="M134 129C170 140 202 149 230 156C226 178 204 190 175 188C148 186 127 172 121 152C123 143 127 135 134 129Z" fill="#c8262c"/>
+    <path d="M131 118C170 130 206 140 240 148C206 118 168 92 123 79A34 34 0 1 0 131 118ZM107.5 94A6.5 6.5 0 1 0 120.5 94A6.5 6.5 0 1 0 107.5 94Z" fill="#3b82f6" fill-rule="evenodd"/>
+  </g>
+  <text x="300" y="147" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="-0.8" fill="#f8fafc">Pelican Auto Proxy</text>
+  <rect x="302" y="168" width="56" height="4" rx="2" fill="#c8262c"/>
+  <text x="300" y="212" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#94a3b8">Public addresses for your game servers. No port forwarding, no exposed IP.</text>
+</svg>

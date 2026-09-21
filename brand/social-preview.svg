@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="tt">
+  <title id="tt">Pelican Auto Proxy</title>
+  <rect width="1280" height="640" fill="#0b0f19"/>
+  <rect x="32.5" y="32.5" width="1215" height="575" rx="24" fill="#111827" stroke="#1f2937"/>
+  <g transform="translate(108 170) scale(1.25)">
+    <path d="M184.4 205.7A96 96 0 1 1 221.2 104.8" fill="none" stroke="#c8262c" stroke-width="18" stroke-linecap="round"/>
+    <path d="M134 129C170 140 202 149 230 156C226 178 204 190 175 188C148 186 127 172 121 152C123 143 127 135 134 129Z" fill="#c8262c"/>
+    <path d="M131 118C170 130 206 140 240 148C206 118 168 92 123 79A34 34 0 1 0 131 118ZM107.5 94A6.5 6.5 0 1 0 120.5 94A6.5 6.5 0 1 0 107.5 94Z" fill="#3b82f6" fill-rule="evenodd"/>
+  </g>
+  <text x="500" y="296" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="-1.4" fill="#f8fafc">Pelican Auto Proxy</text>
+  <rect x="502" y="326" width="64" height="5" rx="2.5" fill="#c8262c"/>
+  <text x="500" y="384" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" font-weight="400" fill="#94a3b8">Public addresses for your game servers.</text>
+  <text x="500" y="426" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="30" font-weight="400" fill="#94a3b8">No port forwarding, no exposed IP.</text>
+</svg>

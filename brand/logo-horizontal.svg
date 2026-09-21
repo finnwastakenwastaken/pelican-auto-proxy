@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 256" width="900" height="256" role="img" aria-labelledby="tt">
+  <title id="tt">Pelican Auto Proxy</title>
+  <!-- Mark sits in its own 256 box; the wordmark starts one ring-diameter-tenth clear of it. -->
+  <g>
+    <path d="M184.4 205.7A96 96 0 1 1 221.2 104.8" fill="none" stroke="#c8262c" stroke-width="18" stroke-linecap="round"/>
+    <path d="M134 129C170 140 202 149 230 156C226 178 204 190 175 188C148 186 127 172 121 152C123 143 127 135 134 129Z" fill="#c8262c"/>
+    <path d="M131 118C170 130 206 140 240 148C206 118 168 92 123 79A34 34 0 1 0 131 118ZM107.5 94A6.5 6.5 0 1 0 120.5 94A6.5 6.5 0 1 0 107.5 94Z" fill="#3b82f6" fill-rule="evenodd"/>
+  </g>
+  <text x="296" y="150" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="60" font-weight="600" letter-spacing="-0.8" fill="#0b0f19">Pelican Auto Proxy</text>
+</svg>

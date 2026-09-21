@@ -33,6 +33,9 @@ SSH into the VPS as root (or a user who can `sudo`) and run:
 curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-vps.sh | sudo bash
 ```
 
+A minimal Debian image may have no `curl`. If the command above says `curl: command not found`, run
+`sudo apt-get install -y curl ca-certificates` once and repeat it.
+
 This sets up the tunnel software and firewall rules on the VPS, generates a private token and certificate (used
 later so only your panel can control this VPS), opens the two ports it needs, and starts the service. It ends by
 printing a boxed **VPS code**: a block of text containing everything the plugin needs to connect to this VPS. Copy
