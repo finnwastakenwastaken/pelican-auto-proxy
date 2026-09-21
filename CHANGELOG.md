@@ -4,10 +4,20 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
-Initial public version, in progress: a public fork of an earlier single-deployment prototype, renamed throughout and
-extended for multiple layouts. Nothing below is released yet — see [docs/dev/release.md](docs/dev/release.md) for
-what still needs to happen first. The three parts version independently; the plugin is at 0.2.0
+Nothing yet.
+
+## [0.2.0] - 2026-09-21
+
+First public release, before 1.0: a public fork of an earlier single-deployment prototype, renamed throughout and
+extended for multiple layouts. Everything below has passed the automated gates and a live end-to-end run on
+Debian 13 (real player IPs, remote node, site mode). Debian 12 has passed the container gate only. What is still
+missing before 1.0 is in [docs/dev/release.md](docs/dev/release.md): screenshots, a timed first-time install, and a
+run on an internet-facing VPS. Treat the plugin's update mechanism and the install commands as final; treat the
+docs as still settling. The three parts version independently; the plugin is at 0.2.0
 (`plugin/autoproxy/plugin.json`), and the agent is stamped from the git tag at build time.
+
+- `scripts/publish-sync.sh` brings an existing public checkout up to date from an export and commits under the
+  public identity, so the public repository keeps its history from 0.2.0 onward.
 
 - CI: the shellcheck job read its file list through a multi-line expression expansion, which ran every script after the first instead of linting it; the PHP job used a shell without process substitution; actions bumped to Node 24 runtimes (checkout v5, setup-go v6, action-gh-release v3) ahead of the Node 20 removal.
 - Release workflow: a manual dry run (workflow_dispatch) builds and checks every asset and uploads them as an artifact without publishing, so the workflow can be exercised before the first tag and on a fork.

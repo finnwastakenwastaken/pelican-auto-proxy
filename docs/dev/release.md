@@ -147,7 +147,12 @@ The `--authors` run is the second half: it checks `git log` author and committer
 public as one in a file, and rewriting history after a push is not a fix. Run this on the repository that is about
 to be pushed, once its history exists.
 
-`scripts/publish-init.sh <target-dir>` chains the two: it exports, initialises a fresh repository in the target with
+`scripts/publish-sync.sh <public-checkout> [tree-ish]` is the routine path once the public repository exists: it
+exports, replaces the checkout's tracked tree with the export (nothing outside `.git` survives), commits under the
+public identity if anything changed, and runs the sweep with `--authors` on the checkout. It never pushes or tags;
+it prints both commands. The public history is kept from 0.2.0 onward, so a release is one sync commit plus a tag.
+
+`scripts/publish-init.sh <target-dir>` was the first publish and chains the two: it exports, initialises a fresh repository in the target with
 a single commit under the public identity (`Arrowtje <…@users.noreply.github.com>`), sets the public remote, and
 runs the sweep with `--authors` on the result. It never pushes; the push is a separate, deliberate command printed
 at the end. The development repository itself is never pushed publicly, because its history carries personal
