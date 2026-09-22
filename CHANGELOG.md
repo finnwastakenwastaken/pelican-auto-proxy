@@ -6,6 +6,10 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 Nothing yet.
 
+## [0.2.5] - 2026-09-22
+
+- Setup page: the node button shows the node's state, green "Proxied" and red "Not proxied". It was red when proxied, which read as a warning.
+
 ## [0.2.4] - 2026-09-21
 
 - Plugin: talking to the VPS now survives a lost packet. Connect timeout 2 s → 5 s, status probes 2 s → 6 s,

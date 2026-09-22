@@ -83,14 +83,16 @@
                                     </div>
 
                                     <div class="flex items-center gap-2">
+                                        {{-- Colour is the node's state, not the action: green means this node is
+                                             proxied, red means it is not. The click still asks before switching off. --}}
                                         @if ($node['proxied'])
-                                            <x-filament::button color="danger" size="sm" icon="tabler-plug-off"
+                                            <x-filament::button color="success" size="sm" icon="tabler-plug-off"
                                                 wire:click="disableProxy({{ $node['id'] }})"
                                                 wire:confirm="Stop proxying {{ $node['name'] }}? Its tunnel client is removed from the VPS and its public ports close immediately. Players connected through them are disconnected.">
                                                 Proxied
                                             </x-filament::button>
                                         @else
-                                            <x-filament::button color="gray" size="sm" icon="tabler-plug"
+                                            <x-filament::button color="danger" size="sm" icon="tabler-plug"
                                                 wire:click="enableProxy({{ $node['id'] }})">
                                                 Not proxied
                                             </x-filament::button>
