@@ -4,7 +4,7 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
-Nothing yet.
+- `installers/setup-node.sh` has now been run end to end on a throwaway Debian 13 machine from the 0.2.6 release asset: Docker installed, Wings installed and started with a panel configuration, a real Let's Encrypt certificate issued through the Cloudflare DNS method and served by Wings with strict verification, renewal dry run passed, second run changed nothing.
 
 ## [0.2.6] - 2026-09-22
 
