@@ -71,7 +71,7 @@ fi
 # first symptom is a 404 in somebody's terminal. Check them against each other.
 release_wf=".github/workflows/release.yml"
 release_doc="docs/dev/release.md"
-for asset in autoproxy-agent_linux_amd64 autoproxy-client.tar.gz install-vps.sh install-client.sh update.json SHA256SUMS; do
+for asset in autoproxy-agent_linux_amd64 autoproxy-client.tar.gz install-vps.sh install-client.sh setup-node.sh update.json SHA256SUMS; do
 	for f in "$release_wf" "$release_doc"; do
 		if grep -qF -- "$asset" "$f"; then
 			ok "$f names $asset"

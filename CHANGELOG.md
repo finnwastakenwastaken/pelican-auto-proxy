@@ -6,6 +6,25 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 Nothing yet.
 
+## [0.2.6] - 2026-09-22
+
+The plugin is unchanged; the version moves with the tag. The node setup script below has passed its container and
+dry-run tests but has not yet been run end to end on a fresh machine (Docker install, Wings unit, real certificate
+issuance); treat it as new.
+
+- New `installers/setup-node.sh`: one interactive script that turns a fresh Debian 12/13 server into a machine
+  ready to be added as a Pelican node. It installs Docker and Wings (enabled, not started, because there is no
+  config yet), issues an HTTPS certificate for the node's hostname with certbot (Cloudflare DNS or HTTP challenge,
+  or a certificate you already have), enables and verifies `certbot.timer`, and adds a deploy hook that restarts
+  Wings only when this node's certificate renewed. It then prints the exact values for Admin -> Nodes -> Create and
+  the DNS rules, including why a Cloudflare orange cloud breaks SFTP, node verification and the console. Four
+  questions, each with a default; `--yes`, `--dry-run`, `--print-certbot-command` and an environment variable per
+  answer for scripting. It never touches an existing `/etc/pelican/config.yml` and a second run changes nothing.
+  It does not install the tunnel client; it prints when to run it, and can run a pasted join command if it is
+  exactly the one the Setup page prints.
+- New page [docs/node-setup.md](docs/node-setup.md), linked from the quick start, the client install page and the
+  README. Releases now publish `setup-node.sh` alongside the other installers.
+
 ## [0.2.5] - 2026-09-22
 
 - Setup page: the node button shows the node's state, green "Proxied" and red "Not proxied". It was red when proxied, which read as a warning.

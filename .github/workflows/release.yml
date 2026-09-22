@@ -104,6 +104,7 @@ jobs:
         run: |
           cp installers/install-vps.sh dist/install-vps.sh
           cp installers/install-client.sh dist/install-client.sh
+          cp installers/setup-node.sh dist/setup-node.sh
 
       - name: infra sweep on the built zip
         env:
@@ -140,13 +141,14 @@ jobs:
             "autoproxy-${VERSION}.zip" \
             install-vps.sh \
             install-client.sh \
+            setup-node.sh \
             update.json > SHA256SUMS
           if grep -nvE '^[0-9a-f]{64}  [^/]+$' SHA256SUMS; then
             echo "the SHA256SUMS lines above are not <64 hex><two spaces><bare filename>; the installers cannot verify them" >&2
             exit 1
           fi
-          if [ "$(wc -l < SHA256SUMS)" -ne 6 ]; then
-            echo "SHA256SUMS must list exactly the 6 published assets" >&2
+          if [ "$(wc -l < SHA256SUMS)" -ne 7 ]; then
+            echo "SHA256SUMS must list exactly the 7 published assets" >&2
             cat SHA256SUMS >&2
             exit 1
           fi
@@ -195,5 +197,6 @@ jobs:
             dist/autoproxy-${{ steps.version.outputs.version }}.zip
             dist/install-vps.sh
             dist/install-client.sh
+            dist/setup-node.sh
             dist/update.json
             dist/SHA256SUMS

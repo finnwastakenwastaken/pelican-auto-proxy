@@ -63,7 +63,11 @@ runs, not just from the VPS itself.
 
 ## Step 3: add a node
 
-A "node" here means a machine running your game servers. Step 2 of the Setup page lists your Pelican nodes. For
+A "node" here means a machine running your game servers. If that machine is a fresh Debian server with nothing on
+it yet, set it up first: [docs/node-setup.md](node-setup.md) installs Docker, Wings and an HTTPS certificate that
+renews itself, and prints the values to type into the panel.
+
+Step 2 of the Setup page lists your Pelican nodes. For
 each one you want reachable from the internet, mark it proxied and choose a mode:
 
 - **This host runs the tunnel client** (real mode): players see their real IP. Pick this when your game servers

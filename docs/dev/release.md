@@ -35,7 +35,7 @@ run without a tag.
 | `autoproxy-agent_linux_amd64` | `agent/`, `CGO_ENABLED=0`, `-trimpath`, version baked in via `-ldflags`. |
 | `autoproxy-client.tar.gz` | `scripts/package-client.sh`: `client/autoproxy-client` plus `client/autoproxy-client.service`. |
 | `autoproxy-<version>.zip` | `scripts/make-plugin-zip.sh` over `plugin/autoproxy/`, `plugin.json` at the zip root; the workflow verifies its `version` field matches the tag before packaging. |
-| `install-vps.sh`, `install-client.sh` | `installers/`, copied as-is. |
+| `install-vps.sh`, `install-client.sh`, `setup-node.sh` | `installers/`, copied as-is. |
 | `update.json` | Generated from `plugin.json`'s version and the tag; this is what the panel's plugin updater reads. |
 | `SHA256SUMS` | Checksums of every asset above, so both installers can verify what they downloaded before running it. |
 

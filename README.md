@@ -89,6 +89,7 @@ The panel itself never runs a tunnel. Wherever the panel lives, all it needs is 
 - [Quick start](docs/quickstart.md): the steps above in full, with a way to check that each one worked.
 - [Supported layouts](docs/layouts.md): four ways to arrange your panel, game servers and the VPS.
 - [Installing the VPS agent](docs/install-vps.md)
+- [Setting up a node machine](docs/node-setup.md): Docker, Wings and an HTTPS certificate on a fresh Debian server
 - [Installing the node client](docs/install-client.md)
 - [Using the plugin](docs/plugin.md)
 - [Security](docs/security.md)

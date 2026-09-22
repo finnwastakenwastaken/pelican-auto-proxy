@@ -10,7 +10,9 @@ does and how to run it yourself if you are scripting an install.
 
 ## Is this node local or remote?
 
-Answer this once per node, before you run anything.
+Answer this once per node, before you run anything. If the machine is a fresh Debian server that is not a Pelican
+node yet, [docs/node-setup.md](node-setup.md) asks the same question and does the rest of the setup (Docker,
+Wings, certificate) around it.
 
 If the node's machine already has a public IP you control, it is a **remote** node and probably does not need the
 proxy at all — players can connect to it directly. A node is not proxied until you mark it proxied on the plugin's
