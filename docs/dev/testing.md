@@ -20,11 +20,24 @@ what a real regression would produce, then fix it back. A gate that has never fa
 ## Fake agent
 
 `test/fake-agent.py` stands in for the real VPS API and serves the whole v1 surface: `GET /v1/status`,
-`GET|PUT /v1/rules`, `GET|POST /v1/peers`, `DELETE /v1/peers/{id}`, `POST /v1/peers/{id}/rotate` and
-`POST /v1/token/rotate`, including join codes, the same bearer-token requirement, the same reserved-port and
+`GET|PUT /v1/rules`, `GET|POST /v1/peers`, `DELETE /v1/peers/{id}`, `POST /v1/peers/{id}/rotate`,
+`PUT /v1/peers/{id}/client` and `POST /v1/token/rotate`, including join codes, the same bearer-token requirement, the same reserved-port and
 validation rejections, and the per-IP lockout after five bad tokens. `--tls` makes it generate a self-signed
 certificate with an IP SAN and print the PEM and the public-key pin, which is what the plugin needs: the plugin
-only ever speaks HTTPS. It lets the plugin be developed and its own test suite run without any VPS at all.
+only ever speaks HTTPS. It lets the plugin be developed and its own test suite run without any VPS at all. A tunnel check-in cannot be
+told apart from any other request on 127.0.0.1, so the fake simulates one instead: `POST /fake/peers/{id}/checkin`
+(token required, fake only) with the body a client would send.
+
+## Contract test against the real agent
+
+`scripts/contract-test/run.sh` runs the plugin's own `AgentClient` against the agent binary built from this tree, in
+a `--network none` container, and feeds the agent's join codes to the client's decoder. From 0.3.0 it also runs the
+client script's own `client_checkin()` against the agent: the peer's tunnel address is put on `lo`, so the
+connection reaches the agent exactly as one through WireGuard would, and it checks that an unknown tunnel address,
+the public address without a token, and the tunnel path with a token are all refused, that `tunnel_guard` is in the
+agent's table at start and nowhere in the base firewall, and that a 401 is read as "agent too old". Build the PHP
+vendor directory once with `scripts/contract-test/vendor.sh`. It is not a CI job (it needs Docker with NET_ADMIN);
+run it before a release.
 
 ## Throwaway panel
 
@@ -55,6 +68,10 @@ downloading a release that does not exist yet. Both skip the checksum gate, and 
 | `AUTOPROXY_LOCAL_BINARY` | `install-vps.sh` | Install this local file as `autoproxy-agent`. No download, no checksum check. |
 | `AUTOPROXY_LOCAL_TARBALL` | `install-client.sh` | Use this local `autoproxy-client.tar.gz`. A `<tarball>.sha256` next to it is used if present; without one, the installer refuses, because it will not extract a tarball it cannot verify. |
 | `AUTOPROXY_VERSION` | both | Pin a release tag instead of resolving `latest`. This keeps the checksum check. |
+| `AUTOPROXY_RELEASE_BASE` | `autoproxy-client update` | Download from `<value>/<tag>/autoproxy-client.tar.gz` and `.../SHA256SUMS` instead of the GitHub release, for a machine with no published release to update to. The checksum check still runs and the client prints a warning whenever it is set. A service drop-in with this variable makes panel-requested updates use it too (the client passes it to the transient update unit). |
+
+`install-client.sh` run with no join code on a machine that already has a client is the update mode; with
+`AUTOPROXY_LOCAL_TARBALL` it is how a test installs an unreleased client build without the join code.
 
 Because the first two bypass verification, they belong in tests and air-gapped installs only — never in an
 instruction given to a user.

@@ -230,6 +230,47 @@ check('every entry carries the peer fields the plugin reads',
     $peers !== [] && !array_filter($peers, fn ($p) => !isset($p['id'], $p['name'], $p['tunnel_ip'], $p['mode'])
         || !array_key_exists('lan_cidrs', $p) || !array_key_exists('handshake_age_s', $p)));
 
+// 4b. client versions (agent 0.3.0) -------------------------------------------
+check('every peer carries a "client" object (agent 0.3.0)',
+    $peers !== [] && !array_filter($peers, fn ($p) => !is_array($p['client'] ?? null)
+        || !array_key_exists('version', $p['client']) || !array_key_exists('desired_version', $p['client'])
+        || !array_key_exists('update', $p['client'])));
+
+$checkinPeer = trim((string) @file_get_contents(dirname($codeFile) . '/checkin-peer'));
+$reported = null;
+foreach ($peers as $p) {
+    if (($p['id'] ?? '') === $checkinPeer) {
+        $reported = $p['client'];
+    }
+}
+// The harness checked in with the client script from the source tree, which
+// calls itself "dev" until scripts/package-client.sh stamps a release number,
+// and from inside a container, which the client correctly reports as "docker".
+check('the tunnel check-in the harness made shows up in GET /v1/peers',
+    is_array($reported) && ($reported['version'] ?? null) === 'dev' && ($reported['flavour'] ?? null) === 'docker'
+    && is_string($reported['reported_at'] ?? null));
+
+$setClient = [];
+show('4c. PUT /v1/peers/{id}/client {"desired_version":"v0.3.1"}', 'PUT {api}/v1/peers/<id>/client',
+    function () use ($client, $checkinPeer, &$setClient) {
+        return $setClient = $client->setClientVersion($checkinPeer, 'v0.3.1');
+    });
+check('the request is stored normalised, with a request id',
+    ($setClient['desired_version'] ?? null) === '0.3.1' && is_string($setClient['request_id'] ?? null));
+
+$refused = '';
+try {
+    $client->setClientVersion($checkinPeer, 'latest; reboot');
+} catch (AutoProxyException $e) {
+    $refused = $e->getMessage();
+}
+echo "REFUSED   " . $refused . "\n";
+check('a desired version that is not a release number is refused (422) with the agent\'s reason',
+    str_contains($refused, 'not a release number'));
+
+$withdrawn = $client->setClientVersion($checkinPeer, null);
+check('null withdraws the request', array_key_exists('desired_version', $withdrawn) && $withdrawn['desired_version'] === null);
+
 // 5. push a real rule and a site rule ----------------------------------------
 $realId = (string) ($real['peer']['id'] ?? '');
 $siteId = (string) ($site['peer']['id'] ?? '');

@@ -126,6 +126,7 @@
                                 <th class="py-2 pe-4 font-medium">Mode</th>
                                 <th class="py-2 pe-4 font-medium">Last handshake</th>
                                 <th class="py-2 pe-4 font-medium">Traffic</th>
+                                <th class="py-2 pe-4 font-medium">Client version</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -149,6 +150,18 @@
                                         {{ isset($peer['rx']) ? number_format((int) $peer['rx'] / 1048576, 1) . ' MiB in' : '-' }},
                                         {{ isset($peer['tx']) ? number_format((int) $peer['tx'] / 1048576, 1) . ' MiB out' : '-' }}
                                     </td>
+                                    @php($clientInfo = collect($clientRows)->firstWhere('id', (string) ($peer['id'] ?? ''))['info'] ?? null)
+                                    <td class="py-2 pe-4">
+                                        @if ($clientInfo)
+                                            <span @class([
+                                                'text-gray-500 dark:text-gray-400' => $clientInfo['tone'] === 'muted',
+                                                'text-success-600 dark:text-success-400' => $clientInfo['tone'] === 'success',
+                                                'text-warning-600 dark:text-warning-400' => $clientInfo['tone'] === 'warning',
+                                            ])>{{ $clientInfo['version'] ?? 'not reported' }}{{ $clientInfo['update_available'] ? ' (update: ' . $clientInfo['latest'] . ')' : '' }}</span>
+                                        @else
+                                            -
+                                        @endif
+                                    </td>
                                 </tr>
                             @endforeach
                         </tbody>
@@ -156,6 +169,97 @@
                 </div>
             @endif
         </x-filament::section>
+
+        @if ($connected && ! $peerError && count($clientRows))
+            <x-filament::section class="lg:col-span-2">
+                <x-slot name="heading">Tunnel client updates</x-slot>
+                <x-slot name="description">
+                    Latest release: {{ $latestRelease ?? 'unknown' }}{{ $latestError ? ' (' . $latestError . ')' : '' }}.
+                    Each client reports its version to the VPS over the tunnel every two minutes. Remote updates are off
+                    until you allow them per client; an update only ever installs an official release, checked against
+                    its published checksums, and never a downgrade.
+                </x-slot>
+
+                <div class="mb-3">
+                    <x-filament::button size="xs" color="gray" icon="tabler-refresh" wire:click="checkLatestRelease">Check for a new release</x-filament::button>
+                </div>
+
+                <div class="space-y-4">
+                    @foreach ($clientRows as $row)
+                        @php($info = $row['info'])
+                        <div class="rounded-xl border border-gray-200 p-4 dark:border-gray-700" wire:key="client-update-{{ $row['id'] }}">
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <p class="font-medium">{{ $row['name'] }}
+                                        <span class="text-sm font-normal text-gray-500 dark:text-gray-400">&mdash; {{ $row['node'] ?? 'not linked to a node' }}{{ $info['flavour'] ? ', ' . ($info['flavour'] === 'docker' ? 'Docker' : 'system service') : '' }}</span>
+                                    </p>
+                                    <p @class([
+                                        'text-sm',
+                                        'text-gray-500 dark:text-gray-400' => $info['tone'] === 'muted',
+                                        'text-success-600 dark:text-success-400' => $info['tone'] === 'success',
+                                        'text-warning-600 dark:text-warning-400' => $info['tone'] === 'warning',
+                                    ])>Client {{ $info['label'] }}</p>
+                                    @if ($info['progress'])
+                                        <p @class([
+                                            'mt-1 text-sm',
+                                            'text-success-600 dark:text-success-400' => $info['progress']['tone'] === 'success',
+                                            'text-warning-600 dark:text-warning-400' => $info['progress']['tone'] === 'warning',
+                                            'text-danger-600 dark:text-danger-400' => $info['progress']['tone'] === 'danger',
+                                        ])>{{ $info['progress']['text'] }}</p>
+                                    @endif
+                                </div>
+
+                                <div class="flex flex-wrap items-center gap-2">
+                                    @if ($row['allowed'])
+                                        <x-filament::button size="sm" color="success" icon="tabler-cloud-download"
+                                            wire:click="disallowRemoteUpdates('{{ $row['id'] }}')"
+                                            wire:confirm="Stop allowing remote updates for {{ $row['name'] }}? A pending request is withdrawn.">
+                                            Remote updates allowed
+                                        </x-filament::button>
+                                    @else
+                                        <x-filament::button size="sm" color="gray" icon="tabler-cloud-off"
+                                            wire:click="allowRemoteUpdates('{{ $row['id'] }}')"
+                                            wire:confirm="Allow remote updates for {{ $row['name'] }}? You can then press Update to have that machine install a newer official release by itself. Anyone holding this panel's VPS API token could also ask it to, but only for an official, checksum-verified, newer release. The machine's owner can refuse with: autoproxy-client remote-updates off">
+                                            Allow remote updates
+                                        </x-filament::button>
+                                    @endif
+
+                                    @if ($info['pending'])
+                                        <x-filament::button size="sm" color="gray" icon="tabler-x"
+                                            wire:click="withdrawClientUpdate('{{ $row['id'] }}')">
+                                            Withdraw request
+                                        </x-filament::button>
+                                    @endif
+
+                                    @if ($row['allowed'] && $info['update_available'])
+                                        <x-filament::button size="sm" color="primary" icon="tabler-download"
+                                            :disabled="! $info['can_remote']"
+                                            wire:click="requestClientUpdate('{{ $row['id'] }}')"
+                                            wire:confirm="Update {{ $row['name'] }} to {{ $info['latest'] }}? That machine downloads the release from GitHub, verifies its checksum, and restarts its client without dropping players.">
+                                            {{ $info['pending'] && $info['desired'] === $info['latest'] ? 'Update to ' . $info['latest'] . ' again' : 'Update to ' . $info['latest'] }}
+                                        </x-filament::button>
+                                    @endif
+                                </div>
+                            </div>
+
+                            @if ($info['remote_note'])
+                                <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">{{ $info['remote_note'] }}</p>
+                            @endif
+
+                            @if ($info['show_command'])
+                                <div class="mt-3">
+                                    <p class="text-sm font-medium">Update it by hand</p>
+                                    @include('autoproxy::partials.copy-block', [
+                                        'value' => $info['command'],
+                                        'help' => $info['command_help'],
+                                    ])
+                                </div>
+                            @endif
+                        </div>
+                    @endforeach
+                </div>
+            </x-filament::section>
+        @endif
 
         <x-filament::section class="lg:col-span-2">
             <x-slot name="heading">Withheld conflicts ({{ count($conflicts) }})</x-slot>

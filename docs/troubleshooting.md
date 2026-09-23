@@ -175,6 +175,40 @@ docker exec <panel container> php artisan schedule:list
 `schedule:run` every minute is the usual fix). Once it runs once, the banner clears within a minute and stays clear
 as long as the scheduler keeps running.
 
+## Client version "not reported" or "unknown"
+
+The Status page shows a client's version only when the client is 0.3.0 or newer **and** the VPS agent is 0.3.0 or
+newer; "unknown" names the agent as the reason, "not reported" the client. When both are new enough and it still
+says "not reported":
+
+- The client checks in every two minutes, and only while its tunnel is up. Wait two minutes after a restart.
+- If you updated the client before the agent, the client backed off for six hours after the old agent turned it away
+  (it says so once in `journalctl -u autoproxy-client`). `sudo systemctl restart autoproxy-client` makes it try at
+  once; the restart does not disconnect players.
+- The check-in goes to the VPS's tunnel address on the API port. If you added the API-port restriction from
+  [security.md](security.md#recommendations) without `iifname != "wg0"`, it drops the check-ins: add that match.
+- An agent on a port other than 7443 with a client installed before 0.3.0: that client's config does not know the
+  port. Add `Environment=AUTOPROXY_API_PORT=<port>` to the service (`systemctl edit autoproxy-client`), or re-run
+  the installer with the node's join code.
+
+## Client update failed
+
+The Status page shows the client's own reason. Nothing was changed on the node in any of these cases; the client
+keeps running the version it had.
+
+- **CHECKSUM MISMATCH**: the download did not match the release's `SHA256SUMS`. Something between the node and GitHub
+  altered it, or the release is broken. Do not retry blindly; report it.
+- **could not download … / could not reach GitHub**: the node cannot reach `github.com` (outbound HTTPS blocked, DNS,
+  a proxy), or that release does not exist. Check with `curl -I https://github.com` on the node.
+- **remote updates are switched off on this node**: the node's owner refused them with
+  `autoproxy-client remote-updates off`. They can allow them with `remote-updates on`, or update by hand.
+- **this node runs the Docker image**: pull the new image instead (`docker compose pull && docker compose up -d`).
+- **refusing to downgrade**: the requested release is older than what the node runs. The panel never asks for that;
+  by hand, `autoproxy-client update --version vX.Y.Z --force` does it deliberately.
+
+After fixing the cause, press **Update** again: every press is a new request, and a client never retries a failed
+request on its own.
+
 ## Lockout / 429
 
 **Symptom:** the plugin reports a 429 (too many requests) from the VPS, or "temporarily locked out."

@@ -65,9 +65,9 @@ print(json.dumps(d, indent=2))
 	# carries omitempty, so it is absent in real mode and present in site mode.
 	local want_keys
 	if [[ "$want_mode" == "site" ]]; then
-		want_keys='client_address,client_privkey,endpoint,keepalive,lan_cidrs,mode,tunnel_subnet,v,vps_tunnel_ip,vps_wg_pubkey'
+		want_keys='api_port,client_address,client_privkey,endpoint,keepalive,lan_cidrs,mode,tunnel_subnet,v,vps_tunnel_ip,vps_wg_pubkey'
 	else
-		want_keys='client_address,client_privkey,endpoint,keepalive,mode,tunnel_subnet,v,vps_tunnel_ip,vps_wg_pubkey'
+		want_keys='api_port,client_address,client_privkey,endpoint,keepalive,mode,tunnel_subnet,v,vps_tunnel_ip,vps_wg_pubkey'
 	fi
 	local got_keys
 	got_keys="$(printf '%s' "$json" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin))))')"

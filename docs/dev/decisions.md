@@ -2,6 +2,44 @@
 
 Newest first. Record why, and what was rejected. No infrastructure values from any real deployment belong here.
 
+## 2026-09-23: Client versions and remote updates (0.3.0)
+
+- Updating a client needed the join code, which the panel shows once. Now: the client carries its real version
+  (stamped by `scripts/package-client.sh`), reports it to the agent over the tunnel, the panel shows it with the
+  exact update command, `autoproxy-client update` needs no join code, the installer without a join code updates in
+  place, and an opt-in per-client button lets the client update itself.
+- **Check-in on the existing API port, through the tunnel, identified by tunnel source address.** Rejected: a new
+  tunnel-only port. The base firewall only accepts SSH, the WireGuard port and the API port, it is written once by
+  setup, and nothing in the agent's own table can accept past its `policy drop`. A new port would have forced every
+  existing install to re-run setup (and rewrite `/etc/nftables.conf`), the one thing the table-201 fix showed can be
+  avoided. The API port is already accepted on every interface, `wg0` included. Rejected: a second listener bound to
+  the tunnel address on the same port (the wildcard listener already holds it; Linux refuses the bind) and
+  `SO_BINDTODEVICE` on a second listener (same reason). Rejected: a token for clients (every node would hold a
+  secret that the tunnel key already is).
+- **`tunnel_guard` in the agent's table** so "addressed to the tunnel address" means "came through the tunnel" even
+  for a neighbour on the VPS's own network segment. A drop can live in the agent's table; an accept could not. It
+  costs one rule and turns a TCP-handshake-and-routing argument into an explicit filter. Proven on the test setup
+  both ways (dropped with it, 401 without it).
+- **The check-in body is decoded leniently**, unlike every token route. A check-in only describes its own peer and
+  cannot create a forward; strictness there would turn "a newer client added a field" into "versions silently stop
+  being reported" until the agent is updated. Every field is still validated, the body capped at 4 KiB.
+- **The client decides, the agent only relays a number.** The panel and the agent can name a release `X.Y.Z`; the
+  URL, the checksum source and the refusal rules (no downgrade, no reinstall, node switch off, Docker) live in the
+  client. One attempt per request id: a failure is not retried every two minutes (GitHub is not hammered and a bad
+  asset is not re-downloaded forever); pressing Update again mints a new id.
+- **Opt-in twice, off by default in the panel.** Per client in the panel (default off), and a node-side switch the
+  API token cannot override (`remote-updates off`). Rejected: node side off by default too. Every node needs one
+  hand-run step to reach 0.3.0 anyway, but asking owners to also flip a switch on each node would make the button
+  useless for the common case of one admin who owns everything; the node switch exists for the case where panel and
+  node have different owners.
+- **An old agent is asked once, then every six hours**, and the backoff is in memory: persisting it across restarts
+  would leave a client silent for hours after its agent was updated, with no way to hurry it.
+- **Hand-run `update` does not report its outcome to the panel**; only a panel request does. A refusal the admin just
+  read in the terminal must not also turn the panel red.
+- Measured live on the test setup: installer update mode and `autoproxy-client update` during a 5 Hz UDP echo
+  through the VPS lost 0 of 200 and 0 of 225 datagrams, handshake timestamp and local port unchanged; a panel-
+  requested self-update ran while 800 TCP connects through the VPS to that node all succeeded.
+
 ## 2026-09-21: First release ships Debian-only; Ubuntu becomes a follow-up
 
 - Project decision: supported platforms for the first release are Debian 12 and Debian 13. Debian 13 has a passed

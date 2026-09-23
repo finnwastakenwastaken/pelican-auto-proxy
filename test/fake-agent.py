@@ -32,7 +32,18 @@ What it implements (bearer token required on every route):
     POST   /v1/peers             create a peer, returns a join code ONCE
     DELETE /v1/peers/{id}        remove a peer and every rule that used it
     POST   /v1/peers/{id}/rotate new key, new join code
+    PUT    /v1/peers/{id}/client ask that peer's client to install a release
+                                 ({"desired_version": "0.3.1"}, null withdraws)
     POST   /v1/token/rotate      new API token; the old one stops working
+
+    POST   /fake/peers/{id}/checkin   FAKE ONLY, token required: pretend that
+                                 peer's client checked in over the tunnel with
+                                 this body ({"version": "0.3.0", "flavour":
+                                 "systemd", "update": {...}}). The real agent
+                                 takes check-ins only on its tunnel address,
+                                 from the peer's own tunnel address, without a
+                                 token; a fake on 127.0.0.1 cannot tell those
+                                 apart, so it simulates them this way instead.
 
 A rule sends one public port (or a range of them) somewhere down the tunnel,
 and says where in exactly one of two ways:
@@ -76,6 +87,9 @@ to get wrong:
     POST /v1/peers 422        {"error": "..."} - a different shape from a rules 422
     POST /v1/token/rotate     200 {"token": "...", "warning": "..."}
     DELETE /v1/peers/{id}     204, no body
+    every peer                "client": {"version", "flavour", "remote_updates",
+                              "reported_at", "desired_version", "request_id",
+                              "requested_at", "update"}, all null until reported
     401                       {"error": "unauthorized"} + WWW-Authenticate
     429                       {"error": "too many failed authentication ..."} + Retry-After
 
@@ -136,6 +150,21 @@ ROTATE_WARNING = ("The previous key stopped working. Re-run the client installer
                   "with this join code; it is shown exactly once.")
 TOKEN_WARNING = ("The previous token stopped working. This value is shown once; "
                  "it is also in %s (mode 0600)." % ENV_FILE)
+
+RELEASE_RE = __import__("re").compile(r"^v?([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})$")
+REPORTED_RE = __import__("re").compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$")
+
+
+def empty_client():
+    return {"version": None, "flavour": None, "remote_updates": None, "reported_at": None,
+            "desired_version": None, "request_id": None, "requested_at": None, "update": None}
+
+
+def version_tuple(v):
+    """(X, Y, Z) for a plain release number, else None ("dev", "0.3.0-rc1")."""
+    m = RELEASE_RE.match((v or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
 
 RFC1918 = [
     ipaddress.ip_network("10.0.0.0/8"),
@@ -283,6 +312,7 @@ class Agent:
             "rx": rx,
             "tx": tx,
             "created_at": peer["created_at"],
+            "client": dict(peer.get("client") or empty_client()),
         }
 
     def _next_tunnel_ip(self):
@@ -410,6 +440,7 @@ class Agent:
                 "lan_cidrs": lan,
                 "created_at": rfc3339(),
                 "_created_mono": time.monotonic(),
+                "client": empty_client(),
             }
             self.peers[peer["id"]] = peer
             code = self._join_code(peer, private_key)
@@ -462,6 +493,59 @@ class Agent:
             "join_code": code,
             "warning": ROTATE_WARNING,
         }
+
+    # -- client versions and update requests ---------------------------------
+
+    def set_client(self, peer_id, body):
+        unknown = set(body) - {"desired_version"}
+        if unknown:
+            # Same as the real agent: unknown fields are an error, not ignored.
+            return 400, {"error": "invalid JSON body: json: unknown field %s" % sorted(unknown)[0]}
+        want = body.get("desired_version")
+        with self.lock:
+            peer = self.peers.get(peer_id)
+            if peer is None:
+                return 404, {"error": "no peer with id " + peer_id}
+            client = peer.setdefault("client", empty_client())
+            if want in (None, ""):
+                client.update(desired_version=None, request_id=None, requested_at=None)
+                log("CLIENT UPDATE WITHDRAWN for %s", peer_id)
+            else:
+                t = version_tuple(want) if isinstance(want, str) else None
+                if t is None:
+                    return 422, {"error": "desired_version %r is not a release number like 1.2.3" % want}
+                client.update(desired_version="%d.%d.%d" % t, request_id=secrets.token_hex(6), requested_at=rfc3339())
+                log("CLIENT UPDATE REQUESTED for %s: %s (request %s)", peer_id, client["desired_version"], client["request_id"])
+            return 200, {"client": dict(client)}
+
+    def fake_checkin(self, peer_id, body):
+        """What the real agent does with a tunnel check-in, minus the tunnel."""
+        version = body.get("version")
+        if not isinstance(version, str) or not REPORTED_RE.match(version):
+            return 400, {"error": "version %r is not a version string" % version}
+        with self.lock:
+            peer = self.peers.get(peer_id)
+            if peer is None:
+                return 404, {"error": "no peer with id " + peer_id}
+            client = peer.setdefault("client", empty_client())
+            client["version"] = version
+            client["flavour"] = body.get("flavour") if body.get("flavour") in ("systemd", "docker") else "unknown"
+            client["remote_updates"] = body.get("remote_updates") if isinstance(body.get("remote_updates"), bool) else None
+            client["reported_at"] = rfc3339()
+            upd = body.get("update")
+            if isinstance(upd, dict) and upd.get("state") in ("updating", "failed", "updated"):
+                client["update"] = {"state": upd["state"], "version": str(upd.get("version") or ""),
+                                    "error": str(upd.get("error") or "")[:300],
+                                    "request_id": str(upd.get("request_id") or ""), "at": rfc3339()}
+            want = client.get("desired_version")
+            have = version_tuple(version)
+            if want and have is not None and have >= version_tuple(want):
+                client["update"] = {"state": "updated", "version": version, "error": "",
+                                    "request_id": client.get("request_id") or "", "at": rfc3339()}
+                client.update(desired_version=None, request_id=None, requested_at=None)
+            log("FAKE CHECK-IN %s: version %s", peer_id, version)
+            return 200, {"desired_version": client.get("desired_version") or "",
+                         "request_id": client.get("request_id") or "", "poll_s": 120}
 
     # -- rules ---------------------------------------------------------------
 
@@ -673,7 +757,7 @@ AGENT = None  # set in main()
 ROUTES_HELP = [
     "GET /v1/status", "GET /v1/rules", "PUT /v1/rules", "GET /v1/peers",
     "POST /v1/peers", "DELETE /v1/peers/{id}", "POST /v1/peers/{id}/rotate",
-    "POST /v1/token/rotate",
+    "PUT /v1/peers/{id}/client", "POST /v1/token/rotate", "POST /fake/peers/{id}/checkin (fake only)",
 ]
 
 
@@ -777,6 +861,14 @@ class Handler(BaseHTTPRequestHandler):
         self._start()
         if not self._authed():
             return
+        parts = self._path().split("/")
+        if len(parts) == 5 and parts[1:3] == ["v1", "peers"] and parts[4] == "client":
+            ok, parsed = self._body()
+            if not ok:
+                return
+            code, payload = AGENT.set_client(parts[3], parsed)
+            self._send(code, payload)
+            return
         if self._path() != "/v1/rules":
             self._not_found()
             return
@@ -804,6 +896,13 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.split("/")
         if len(parts) == 5 and parts[1:3] == ["v1", "peers"] and parts[4] == "rotate":
             code, payload = AGENT.rotate_peer(parts[3])
+            self._send(code, payload)
+            return
+        if len(parts) == 5 and parts[1:3] == ["fake", "peers"] and parts[4] == "checkin":
+            ok, parsed = self._body()
+            if not ok:
+                return
+            code, payload = AGENT.fake_checkin(parts[3], parsed)
             self._send(code, payload)
             return
         self._not_found()

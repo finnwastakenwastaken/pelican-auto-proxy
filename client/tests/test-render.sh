@@ -184,6 +184,77 @@ repath_case "no second move 30s after the first" 210 30 no
 repath_case "second move a full interval after the first" 360 180 yes
 repath_case "long outage keeps moving" 900 200 yes
 
+# --- versions: the client's twin of agent/internal/clients.Compare ---------
+
+vcmp_case() {
+    local a="$1" b="$2" want="$3" got
+    got="$(version_cmp "$a" "$b")" || got="unparsable"
+    check_eq "version_cmp $a vs $b" "$got" "$want"
+}
+vcmp_case 0.3.0 0.3.0 0
+vcmp_case v0.3.0 0.3.0 0
+vcmp_case 0.2.7 0.3.0 -1
+vcmp_case 0.10.0 0.9.9 1
+vcmp_case 0.3.0-rc1 0.3.0 -1
+vcmp_case 0.3.0 0.3.0-rc1 1
+vcmp_case 0.3.0-dev 0.3.0 -1
+vcmp_case 0.3.0+b1 0.3.0 0
+vcmp_case 0.08.0 0.8.0 0
+vcmp_case dev 0.3.0 unparsable
+vcmp_case 0.3 0.3.0 unparsable
+
+check_eq "normalize_release v0.3.1" "$(normalize_release v0.3.1)" "0.3.1"
+for bad in "latest" "0.3" "0.3.1-rc1" "0.3.1/../../x" "0.3.1 x" "" "v12345.0.0"; do
+    if normalize_release "$bad" >/dev/null; then
+        echo "FAIL: normalize_release accepted '$bad'"
+        fail=1
+    else
+        echo "ok:   normalize_release refuses '$bad'"
+    fi
+done
+
+# --- remote_update_decision: every branch -----------------------------------
+# args: desired, request id, own version, flavour, remote updates enabled, last request id
+
+rud_case() {
+    local name="$1" want="$2"; shift 2
+    local got
+    got="$(remote_update_decision "$@")"
+    check_eq "remote_update_decision: $name" "${got%%:*}" "$want"
+}
+rud_case "nothing requested" none "" "" 0.3.0 systemd 1 ""
+rud_case "newer release requested" run 0.3.1 r1 0.3.0 systemd 1 ""
+rud_case "same request is not retried by itself" none 0.3.1 r1 0.3.0 systemd 1 r1
+rud_case "a new request id retries" run 0.3.1 r2 0.3.0 systemd 1 r1
+rud_case "already there" none 0.3.1 r1 0.3.1 systemd 1 ""
+rud_case "never a downgrade" none 0.2.7 r1 0.3.0 systemd 1 ""
+rud_case "node switched remote updates off" refuse 0.3.1 r1 0.3.0 systemd 0 ""
+rud_case "docker cannot replace itself" refuse 0.3.1 r1 0.3.0 docker 1 ""
+rud_case "not a release number" refuse "0.3.1;reboot" r1 0.3.0 systemd 1 ""
+rud_case "a development copy follows a request" run 0.3.1 r1 dev systemd 1 ""
+
+# --- checkin_body: valid JSON the agent can decode, whatever the error says --
+
+body="$(checkin_body 0.3.0 systemd true failed 0.3.1 'curl: (6) "quoted" \ back	slash' r1)"
+if command -v python3 >/dev/null 2>&1; then
+    parsed="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["version"], d["flavour"], d["remote_updates"], d["update"]["state"], d["update"]["request_id"])' "$body" 2>&1)"
+    check_eq "checkin_body with an awkward error message is valid JSON" "$parsed" "0.3.0 systemd True failed r1"
+    parsed="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print("update" in d)' "$(checkin_body 0.3.0 docker false "" "" "" "")")"
+    check_eq "checkin_body without an update carries no update key" "$parsed" "False"
+else
+    echo "SKIP: checkin_body JSON check (python3 not installed on this host)"
+fi
+
+# --- render_client_json: api_port (0.3.0 join codes) round-trips ----------
+
+client_json="$(render_client_json "1" "203.0.113.10:51820" "PUB" "PRIV" "10.66.66.7/32" \
+    "10.66.66.0/24" "10.66.66.1" "real" "25" "" "" "8443")"
+check_eq "render_client_json: api_port round-trips" "$(json_get "$client_json" api_port)" "8443"
+
+# The script in the tree is never a release: scripts/package-client.sh stamps
+# the real number when it builds the tarball.
+check_eq "the source tree says AUTOPROXY_VERSION=dev" "$AUTOPROXY_VERSION" "dev"
+
 echo
 if [[ $fail -ne 0 ]]; then
     echo "test-render: FAILED"

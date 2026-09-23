@@ -4,6 +4,66 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-23
+
+Update in this order: VPS agent, then plugin, then clients ([docs/updating.md](docs/updating.md)). The agent update
+is a binary swap and a restart; setup does not need to run again and `/etc/nftables.conf` does not change. Older
+clients keep working against the new agent, and a 0.3.0 client against an older agent keeps forwarding and only
+cannot report its version.
+
+- **Node clients can be updated without their join code.** `sudo autoproxy-client update [--version vX.Y.Z]`
+  downloads the release from GitHub exactly as the installer does, refuses on a `SHA256SUMS` mismatch, replaces the
+  script and the unit, and restarts without a rekey, so players stay connected. It refuses a downgrade unless
+  `--force`, and refuses in the Docker image (pull a new image instead). Clients older than 0.3.0 update by running
+  the installer **without** a join code: on a machine that already has a client, `install-client.sh` now swaps the
+  script and unit in place, keeps the configuration and keys, and restarts the service only if it was running.
+- **The client knows its version.** `AUTOPROXY_VERSION` was hard-coded to 0.1.0 in every release. The release
+  workflow now stamps the tag's version into the script (`scripts/package-client.sh <out> <version>`, which refuses
+  to build without the stamp line and reads it back from the archive); a source checkout says `dev`.
+  `autoproxy-client status` shows it on its first line, `status --json` has `version`, `flavour` and
+  `remote_updates`.
+- **Clients report their version to the VPS**, every two minutes over the tunnel, to the agent's tunnel address on
+  the API port (`POST /v1/tunnel/checkin`). No token: the agent answers only a connection to its tunnel address from
+  a peer's own tunnel address, which WireGuard ties to that peer's key. A new chain `tunnel_guard` in the agent's own
+  nftables table drops anything addressed to the tunnel address that did not come in on `wg0`. An older agent turns
+  the check-in away; the client logs that once and asks again after six hours or a restart. Join codes from a 0.3.0
+  agent carry `api_port`.
+- **Agent API:** `GET /v1/peers` has a `client` object per peer (version, flavour, remote-update setting, when it last
+  reported, the requested release and the last update result). New `PUT /v1/peers/{id}/client`
+  (`{"desired_version": "X.Y.Z"}`, `null` withdraws). Client state is kept in `/var/lib/autoproxy/clients.json`.
+  The agent now also renders its table at start when it has no stored rules, so the guard never waits for the first
+  push.
+- **Plugin, Status page:** a client-version column and a "Tunnel client updates" section: each client's version,
+  "update available" against the latest release (read from the same `update.json` the plugin updater uses, cached for
+  an hour), the exact update command for that machine with a Copy button (the `update` command, the installer for
+  clients older than 0.3.0, or `docker compose pull` for the Docker flavour), and an opt-in one-click update: **Allow
+  remote updates** per client (off by default), then **Update to X**. The client installs X by itself within about
+  three minutes (a check-in every two, the loop ticks every 30 s) and the page shows requested, then updated, or
+  failed with the client's own reason. Setup step 2 shows the version and the progress line per node. New table
+  `autoproxy_client_updates`.
+- **Client `remote-updates on|off|status`:** the node owner's switch, which no panel or API token can override.
+  What remote updates allow, and what a leaked API token can now do (make a client with remote updates on install a
+  newer official, checksum-verified release, never other code and never a downgrade), is in
+  [docs/security.md](docs/security.md).
+- **Docs:** [updating.md](docs/updating.md) (order, the agent binary swap, clients without a join code, one click,
+  Docker, rollback), [security.md](docs/security.md) (remote updates, the check-in route; the API-port restriction
+  example now keeps `wg0` open for check-ins), [troubleshooting.md](docs/troubleshooting.md) ("not reported", "update
+  failed").
+- Tests: Go unit tests for the check-in identity rules, the guard chain, the version compare and the request
+  lifecycle; client tests for version compare, the remote-update decision and the check-in body; plugin checks in
+  `test/rules-test.php`; `scripts/test-checksum-parse.sh` holds the client's own checksum verification to the same
+  fixture as the installer and asserts the two functions are identical; the contract test runs the client's real
+  check-in against the real agent; `scripts/vps-test` checks the guard is in the agent's table at start and after a
+  restart, and nowhere in `/etc/nftables.conf`. The fake agent serves the new route and simulates check-ins.
+- Plugin: the settings window (Admin -> Plugins -> Auto Proxy -> Settings) is redesigned. A status block at the top
+  says whether everything works, or lists what needs attention with a button to the Status page (same checks as the
+  dashboard banner); four at-a-glance cards; pages and documentation as labelled buttons; the VPS API address is
+  copyable; the troubleshooting list shows each problem as its own card with a copyable command and opens by itself
+  when something is wrong. The old list rendered as one run-on paragraph.
+- Plugin: buttons that showed only an icon now show their text: Rotate API token, the page and documentation links
+  in the settings window, Sync now and Test VPS on the Status page, and New manual forward on the Forwards page.
+  Pelican's "icon buttons" preference (on by default) had reduced them to bare icons.
+
 ## [0.2.7] - 2026-09-23
 
 The plugin is unchanged; the version moves with the tag. Update the tunnel client on each node host as described in

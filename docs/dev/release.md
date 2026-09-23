@@ -33,7 +33,7 @@ run without a tag.
 | Asset | From |
 |---|---|
 | `autoproxy-agent_linux_amd64` | `agent/`, `CGO_ENABLED=0`, `-trimpath`, version baked in via `-ldflags`. |
-| `autoproxy-client.tar.gz` | `scripts/package-client.sh`: `client/autoproxy-client` plus `client/autoproxy-client.service`. |
+| `autoproxy-client.tar.gz` | `scripts/package-client.sh dist/autoproxy-client.tar.gz <version>`: `client/autoproxy-client` with the tag's version stamped into its `AUTOPROXY_VERSION` line, plus `client/autoproxy-client.service`. |
 | `autoproxy-<version>.zip` | `scripts/make-plugin-zip.sh` over `plugin/autoproxy/`, `plugin.json` at the zip root; the workflow verifies its `version` field matches the tag before packaging. |
 | `install-vps.sh`, `install-client.sh`, `setup-node.sh` | `installers/`, copied as-is. |
 | `update.json` | Generated from `plugin.json`'s version and the tag; this is what the panel's plugin updater reads. |
@@ -52,6 +52,11 @@ Dictated by `installers/install-client.sh`, which extracts into a scratch direct
 `<scratch>/autoproxy-client` and `<scratch>/autoproxy-client.service`:
 
 - exactly two members, both at the archive **root**, with no directory prefix;
+- the script's `readonly AUTOPROXY_VERSION="dev"` line replaced by the release number (the source tree always says
+  `dev`; the packaging script refuses to build when that line is missing or duplicated, and reads the stamp back out of the
+  finished archive). This is what `autoproxy-client status` shows, what the client reports to the agent, and what
+  `autoproxy-client update` compares before installing anything. Without a version argument it stamps
+  `<plugin.json version>-dev`, so a local build never passes for a release;
 - `autoproxy-client`, mode `0755`;
 - `autoproxy-client.service`, mode `0644`.
 

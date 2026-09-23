@@ -66,6 +66,8 @@ type Config struct {
 	// skipped rather than guessed at.
 	PublicIP  netip.Addr
 	VPSPubKey string
+	// APIPort is copied into join codes (JoinCode.APIPort). Zero leaves it out.
+	APIPort int
 }
 
 // Manager owns the peer list: allocation, validation, persistence and the live
@@ -389,6 +391,7 @@ func (m *Manager) joinCode(p Peer, priv string) JoinCode {
 		Mode:         p.Mode,
 		LANCIDRs:     p.LANCIDRs,
 		Keepalive:    Keepalive,
+		APIPort:      m.cfg.APIPort,
 	}
 }
 

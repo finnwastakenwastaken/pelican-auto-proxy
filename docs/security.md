@@ -21,10 +21,12 @@ The VPS code contains the API token, the pinned certificate, and the WireGuard p
 has it can:
 
 - Call the VPS's API with full rights: read and replace the entire forwarding rule set, add or remove peers.
+- Ask a tunnel client to install a different **official** release of the client, from 0.3.0 on (see "Remote client
+  updates" below for exactly what that can and cannot do).
 - They cannot join the tunnel with it alone — joining requires a peer key that only a join code carries.
 
-**To rotate:** open **Admin → Plugins**, press the settings button on the Auto Proxy row, and use **Rotate the API
-token now**. The panel asks the VPS for a new token and stores it before telling you it worked — the token itself is
+**To rotate:** open **Admin → Plugins**, press the settings button on the Auto Proxy row, and use **Rotate API token**
+under VPS API. The panel asks the VPS for a new token and stores it before telling you it worked — the token itself is
 never shown, because the panel is the only thing that needs it. The old token stops working the moment the VPS
 answers, so any copy of it elsewhere (your notes, a second panel) is dead; nothing that was already forwarding
 stops, since the rule set on the VPS does not change.
@@ -43,10 +45,74 @@ installer with the new code), and **deleting the peer** from the Setup page, whi
 routes immediately. The panel keeps its own copy of a join code encrypted and deletes it as soon as that peer's
 first handshake arrives.
 
+## Remote client updates (0.3.0 and later)
+
+The Status page can update a node's tunnel client with one click. It is **off for every client** until an admin turns
+on "Allow remote updates" for that client, and a node's owner can refuse it on the machine itself no matter what the
+panel says.
+
+How it works, and why each step is there:
+
+1. The admin presses **Update**. The panel tells the VPS agent, with its API token, one thing: the release number that
+   client should run (`PUT /v1/peers/{id}/client`, `{"desired_version": "0.3.1"}`). Only a plain release number is
+   accepted, `X.Y.Z`; no URL, no file, no command.
+2. Every two minutes each client checks in with the VPS over its WireGuard tunnel and hears that number back.
+3. The client decides for itself. It acts only if remote updates are on for that machine
+   (`autoproxy-client remote-updates`, default on), the number is **newer** than what it runs (never a downgrade,
+   never a reinstall), and it has not already tried this exact request.
+4. It downloads `autoproxy-client.tar.gz` and `SHA256SUMS` for that tag from this project's GitHub release page — the
+   address is built into the client, the panel and the VPS cannot change it — and refuses to install anything whose
+   checksum does not match, exactly as the installer does. Then it replaces its script and unit and restarts itself
+   without touching the tunnel's keys or config.
+5. It reports "updated" or "failed" with its reason, which the Status and Setup pages show.
+
+**What a leaked API token can now do**, on top of what it could before: make a client that has remote updates on
+install a *newer official release* of the client, published on this project's GitHub release page and verified
+against that release's checksums. It cannot make a client run code the attacker wrote, download from anywhere else,
+downgrade to an older release with a known bug, or reinstall the same one. The worst it can do is move a node to a
+newer version of software the node's owner already chose to run, at a moment of the attacker's choosing — which is
+why remote updates are **off by default**, per client, and why the node keeps the final say. (The API token could
+already do far worse — rewrite every forward and remove every peer — so this does not make a leaked token much more
+dangerous. It is still a new capability, and it is listed here so nobody has to discover it.)
+
+The GitHub release page itself is trusted, as it already is by every install and every manual update. If you do not
+want a node to trust it without you watching, keep remote updates off for that node.
+
+**Turning it off:**
+
+- For one client, in the panel: Auto Proxy → Status → Tunnel client updates → press **Remote updates allowed** to
+  switch it off. A pending request is withdrawn on the VPS at the same time; if the VPS cannot be reached, the switch
+  stays on and says why, rather than pretending.
+- On the node itself, regardless of the panel or anyone holding the API token:
+
+  ```bash
+  sudo autoproxy-client remote-updates off
+  ```
+
+  The client then refuses every request and reports the refusal to the panel. `remote-updates on` allows them again;
+  `remote-updates status` prints the current setting. It is stored in `/etc/autoproxy/remote-updates`.
+- The Docker flavour never updates itself: a container cannot replace its own image. Pull the new image instead.
+
+## The tunnel check-in endpoint (0.3.0 and later)
+
+Clients report their version to the agent on the VPS's **tunnel** address (`10.66.66.1`, the API port), inside
+WireGuard, without the API token. That is the one route without a token, and it is not reachable from the internet:
+
+- The agent answers it only for a connection addressed to its tunnel address **and** coming from a tunnel address that
+  belongs to a peer. WireGuard delivers a packet from `10.66.66.5` only if it was sealed with the key of the peer that
+  owns `10.66.66.5`, so the source address identifies the client. A request from anywhere else, including one that
+  uses the same path on the public address, is treated like any other request without the token: 401, and it counts
+  towards the lockout.
+- The agent's own nftables table drops any packet addressed to the tunnel address that did not arrive on `wg0` (chain
+  `tunnel_guard` in `inet autoproxy_rules`). Nothing on the internet routes `10.66.66.1` to your VPS anyway; this
+  also covers a machine on the VPS's own network segment trying to hand-route a packet to it.
+- What a check-in can do: set that one client's own reported version, flavour and update result, and read back the
+  release number requested for it. It cannot change a forward, a peer or anything about another client.
+
 ## Public API hardening
 
 The API is HTTPS-only, token-protected, and rejects unknown routes the same as known ones without the token — there
-is no unauthenticated endpoint to probe. Repeated failed attempts from one address trigger a lockout (a short window
+is no unauthenticated endpoint to probe from the internet (the check-in route above answers only through the tunnel). Repeated failed attempts from one address trigger a lockout (a short window
 of rejected requests, logged), so a guessed or brute-forced token is not a fast attack even before you rotate it.
 The certificate is self-signed and pinned by the plugin at setup time, so a network position between panel and VPS
 cannot swap in a different certificate later without the plugin noticing.
@@ -59,7 +125,8 @@ The installer does not ask for more than that: it does not touch SSH or user acc
 node host is `/etc/autoproxy/client.json`, `/etc/wireguard/autoproxy0.conf`, `/etc/sysctl.d/90-autoproxy.conf`,
 `/usr/local/bin/autoproxy-client`, its own systemd unit, the `autoproxy0` interface with one `ip rule` and one
 routing table, its own `inet autoproxy_client` nftables table, and two accept rules in Docker's `DOCKER-USER` chain
-if that chain exists. `autoproxy-client uninstall` lists and removes exactly that set.
+if that chain exists; from 0.3.0 also `/etc/autoproxy/remote-updates` (only if you run `remote-updates on|off`) and
+runtime state under `/run/autoproxy-client`. `autoproxy-client uninstall` lists and removes exactly that set.
 
 ## What an admin can expose
 
@@ -110,10 +177,11 @@ All three are deliberate, and all three are the kind of thing worth knowing befo
   ```bash
   sudo nft add table inet autoproxy_apiguard
   sudo nft add chain inet autoproxy_apiguard input { type filter hook input priority -10 \; policy accept \; }
-  sudo nft add rule inet autoproxy_apiguard input tcp dport 7443 ip saddr != <panel IP> drop
+  sudo nft add rule inet autoproxy_apiguard input tcp dport 7443 iifname != "wg0" ip saddr != <panel IP> drop
   ```
 
-  This lives in its own table, separate from the ones the agent manages, so a plugin sync never removes it. To
+  `iifname != "wg0"` keeps the tunnel clients' version check-ins working (they reach the same port through the
+  tunnel); without it the panel shows every node's client version as "not reported". This lives in its own table, separate from the ones the agent manages, so a plugin sync never removes it. To
   undo: `sudo nft delete table inet autoproxy_apiguard`.
 - **Rotate the token after removing an admin who had panel access**, the same way you'd rotate any other shared
   credential that person could read.

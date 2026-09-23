@@ -3,6 +3,10 @@
 #
 # Usage:
 #   curl -fsSL <release-url>/install-client.sh | sudo bash -s -- <join-code> [install options]
+#   curl -fsSL <release-url>/install-client.sh | sudo bash
+#       (no join code, on a machine that already runs the client: update it.
+#        The script and the unit are replaced and the service restarted; the
+#        config, the keys and the live tunnel are left alone, so no rekey.)
 #
 # Env:
 #   AUTOPROXY_VERSION=v1.2.3     pin a release instead of resolving latest
@@ -120,6 +124,31 @@ log "extracting to /usr/local/bin and /etc/systemd/system"
 extracted="$workdir/extracted"
 mkdir -p "$extracted" /usr/local/bin /etc/systemd/system
 tar -xzf "$tarball" -C "$extracted"
+
+# No join code: update an existing install in place. Deliberately does not run
+# "autoproxy-client install", which rewrites the config from a join code: the
+# code is shown once in the panel and nobody should need it again to update.
+if [[ $# -eq 0 ]]; then
+    if [[ ! -f /etc/autoproxy/client.json ]]; then
+        err "no join code given, and no client is installed here to update."
+        err "To install, copy the join command for this machine from the panel's Setup page."
+        exit 2
+    fi
+    old_version="$(/usr/local/bin/autoproxy-client version 2>/dev/null || echo 'an unknown version')"
+    # Rename into place: the running service is executing the old file.
+    install -m 0755 "$extracted/autoproxy-client" /usr/local/bin/autoproxy-client.new
+    mv -f /usr/local/bin/autoproxy-client.new /usr/local/bin/autoproxy-client
+    install -m 0644 "$extracted/autoproxy-client.service" /etc/systemd/system/autoproxy-client.service.new
+    mv -f /etc/systemd/system/autoproxy-client.service.new /etc/systemd/system/autoproxy-client.service
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload
+        # try-restart: restarts only a running service, never starts a stopped one.
+        systemctl try-restart autoproxy-client.service
+    fi
+    log "updated ${old_version} -> $(/usr/local/bin/autoproxy-client version)"
+    log "config and keys unchanged; the restart leaves the tunnel up (no rekey)"
+    exit 0
+fi
 
 install -m 0755 "$extracted/autoproxy-client" /usr/local/bin/autoproxy-client
 install -m 0644 "$extracted/autoproxy-client.service" /etc/systemd/system/autoproxy-client.service

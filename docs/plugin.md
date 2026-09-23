@@ -25,6 +25,9 @@ from wherever the panel itself runs, since a panel hosted elsewhere needs its ow
 - The row then shows a **join command**, in system-service and Docker tabs with a copy button, and a live **peer
   status** once you've run it: handshake age, "never joined", or "stale" if the handshake is older than a few
   minutes.
+- Once the client reports it (0.3.0 clients with a 0.3.0 agent), a line under the status gives the **client version**
+  and whether an update is available, plus the progress of an update you asked for on the Status page, where the
+  update itself is done.
 
 **Step 3 — public hostname and aliases.** Optional public hostname (shown to players instead of the bare VPS IP once
 set) and the alias keywords that mark an allocation public (`proxy` and `public` by default — see "Alias rules"
@@ -135,6 +138,18 @@ open on a second screen while you fix something. **Sync now** and **Test VPS** s
   WireGuard handshake age across all peers. "Unreachable" here means the panel cannot push new rules to the VPS
   right now; it does not mean players are disconnected — the VPS keeps serving whatever it last applied.
 - **Per-node peer status**: same handshake-age view as Setup step 2, in one place for every node at once.
+- **Client version** column: what each tunnel client last reported to the VPS, and "update: X" when a newer release
+  exists.
+- **Tunnel client updates**: one card per client with its version, whether it is up to date, the command that
+  updates it (with a Copy button), and progress of an update you asked for. The latest release is read from the same
+  `update.json` the panel's plugin updater uses and cached for an hour; **Check for a new release** looks again now.
+  - **Allow remote updates** (off by default, per client) and then **Update to X** make that client install release
+    X by itself within about three minutes, without dropping players. You see *requested*, then *updated*, or *failed*
+    with the client's own reason; nothing changes on the node when it fails. **Withdraw request** cancels one that
+    has not started. See [security.md](security.md#remote-client-updates-030-and-later) for what allowing this means.
+  - No one-click update for clients older than 0.3.0 (they cannot update themselves; the card shows the one command
+    that brings them to 0.3.0), for the Docker flavour (pull the image; the card says how), or when the VPS agent is
+    older than 0.3.0 (the card says to update the agent first).
 - **Last sync**: when the panel last talked to the agent, what it last pushed, and any error in plain text.
 - **Sync now**: pushes immediately instead of waiting for the next scheduled run.
 - **Test VPS**: asks the VPS for its status right now and reports what came back, without changing anything.
@@ -179,11 +194,20 @@ dashboard hang.
 
 ## The plugin settings modal
 
-Settings -> Plugins -> Pelican Auto Proxy opens a read-only modal: what the plugin does, the current state at a
-glance (VPS connected and agent version, tunnel clients connected of total, forwards pushed, last successful sync
-and last error), links to the Setup, Status and Forwards pages, links to the documentation on GitHub, and a short
-list of the five problems that come up most with the first command to run for each. Everything editable is on the
-Setup page. The only action in the modal is **Rotate the API token now**, which asks for confirmation first.
+Settings -> Plugins -> Pelican Auto Proxy opens a read-only window, top to bottom:
+
+- **Status:** green "Everything is working", amber "N things need attention" with each problem spelled out and a
+  button to the Status page, or blue "Not connected to a VPS yet" with a button to Setup. It uses the same checks as
+  the dashboard banner, so the two never disagree.
+- **At a glance** (once a VPS is connected): forwards (from allocations and manual), tunnel clients connected of
+  total, last successful sync and last push, and the VPS agent version.
+- **Pages** (Setup, Status, Forwards) and **Documentation** (opens on GitHub in a new tab).
+- **VPS API:** the API address (copyable) and **Rotate API token**, which asks for confirmation first.
+- **If something is not working:** the five problems that come up most, each with the first thing to check and a
+  copyable command where there is one. Folded away while everything works, open when something does not.
+- **About Auto Proxy:** what the plugin does; folded away once a VPS is connected.
+
+Everything editable is on the Setup page. The window's Submit button is Pelican's own and does nothing here.
 
 Every number in the modal comes from the row the reconcile already wrote, so opening the Plugins page never waits
 on the VPS.

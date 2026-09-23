@@ -80,6 +80,7 @@
                                                 'text-warning-600 dark:text-warning-400' => $node['status']['tone'] === 'warning',
                                                 'text-danger-600 dark:text-danger-400' => $node['status']['tone'] === 'danger',
                                             ])">{{ $node['status']['text'] }}</p>
+                                        @include('autoproxy::partials.client-version-line', ['client' => $node['client'], 'statusUrl' => $statusUrl])
                                     </div>
 
                                     <div class="flex items-center gap-2">
@@ -206,6 +207,7 @@
                                                     'text-warning-600 dark:text-warning-400' => $client['status']['tone'] === 'warning',
                                                     'text-danger-600 dark:text-danger-400' => $client['status']['tone'] === 'danger',
                                                 ])">{{ $client['status']['text'] }}</p>
+                                            @include('autoproxy::partials.client-version-line', ['client' => $client['client'], 'statusUrl' => $statusUrl])
                                         </div>
                                         <div class="flex gap-2">
                                             <x-filament::button size="xs" color="gray" icon="tabler-refresh"

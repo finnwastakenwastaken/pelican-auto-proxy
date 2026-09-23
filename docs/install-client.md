@@ -132,6 +132,12 @@ Real mode is the default when the node's Wings process runs on the same host as 
 | sysctl | `net.ipv4.conf.autoproxy0.rp_filter=2` (in `/etc/sysctl.d/90-autoproxy.conf`) | Reverse-path filtering set to "loose" for the tunnel interface — required because replies leave by a different route than requests arrive by; leaving this at strict (the Debian/Ubuntu default is usually 1 or inherited) silently drops every reply. Linux takes `max(all, interface)`, so a host-wide `all.rp_filter=1` does not override it; if `status` still reports anything but `2`, something else on the host is resetting it. |
 | sysctl | `net.ipv4.ip_forward=1` (same file) | Needed even in real mode when the game server itself runs in a container publishing ports, so the host can route between the tunnel and the container network. |
 | Docker (if present) | two rules in `DOCKER-USER` (table `ip filter`) | Accept traffic to and from the tunnel interface. Docker's own `FORWARD` chain policy is drop; without these two rules, forwarding looks completely dead — handshakes succeed but no game traffic crosses — with no error anywhere. |
+| File (optional) | `/etc/autoproxy/remote-updates` | Only if you run `autoproxy-client remote-updates on\|off`: whether updates requested from the panel may run here. Absent means on (the panel's own per-client switch is off until an admin allows it). |
+| Runtime state | `/run/autoproxy-client/` | The last update request this client acted on and how it went, so a restart does not repeat it. Gone after a reboot, by design. |
+
+The running client also reports its version to the VPS agent every two minutes, over the tunnel, to the VPS's tunnel
+address (`10.66.66.1` and the API port, 7443 unless your agent uses another). Nothing is opened on this machine for
+that: it is an outgoing HTTPS request inside WireGuard.
 
 ### `--host-ip`
 
@@ -165,9 +171,17 @@ the VPS: which address its DNAT rules point at, and whether it masquerades befor
 sudo autoproxy-client status
 ```
 
-Reports the WireGuard handshake age, whether the expected nftables table and rules are present, and exits non-zero
+Its first line is the client's version, flavour, and whether remote updates are on (`version: 0.3.0 (systemd; remote
+updates on)`). It then reports the WireGuard handshake age, whether the expected nftables table and rules are present, and exits non-zero
 if anything is missing — safe to use in a monitoring check. On the plugin side, the Setup or Status page shows the
 same node's handshake age within a minute of the client starting.
+
+## Updating
+
+`sudo autoproxy-client update` (0.3.0 and later) installs the latest release without the join code and without
+disconnecting players; clients older than 0.3.0 update by running the installer without a join code. The panel's
+Status page shows each client's version and the exact command, and can also update a client with one click once you
+allow it. Details: [updating.md](updating.md#node-client).
 
 ## Undo
 
@@ -176,7 +190,7 @@ sudo autoproxy-client uninstall
 ```
 
 Lists what it is about to remove (the systemd unit, `/etc/autoproxy/client.json`, `/etc/wireguard/autoproxy0.conf`,
-`/etc/sysctl.d/90-autoproxy.conf`, the binary, the `autoproxy0` interface with its `ip rule` and routing table, the
+`/etc/sysctl.d/90-autoproxy.conf`, `/etc/autoproxy/remote-updates` and `/run/autoproxy-client` if present, the binary, the `autoproxy0` interface with its `ip rule` and routing table, the
 `inet autoproxy_client` table, the `DOCKER-USER` rules if it added them) and asks for confirmation unless `--yes` is
 given. Without a terminal attached and without `--yes` it refuses rather than guessing. The apt packages it
 installed are left in place, and the live `ip_forward`/`rp_filter` kernel values stay as they are until reboot —

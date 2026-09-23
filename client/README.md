@@ -82,6 +82,8 @@ reach the game server.
   that rule is absent, which is what keeps the player's own address intact all the way to the game
   server.
 - Two accept rules in Docker's `DOCKER-USER` chain, if that chain exists (see Troubleshooting).
+- `/etc/autoproxy/remote-updates`, only if you run `remote-updates on|off`, and runtime state in
+  `/run/autoproxy-client/` (the last update request acted on; cleared by a reboot).
 
 Run `autoproxy-client status` any time to see exactly what's live. `autoproxy-client uninstall` lists
 everything above before removing it, and asks for confirmation unless you pass `--yes`.
@@ -95,8 +97,37 @@ autoproxy-client run                    # up, then log health forever (what the 
 autoproxy-client status [--json]        # exit 0 if healthy, 1 otherwise
 autoproxy-client down                   # tear down everything up/run created
 autoproxy-client uninstall [--yes]      # remove files, unit, sysctl config, network state
+autoproxy-client update [--version vX.Y.Z] [--force] [--no-restart]
+                                        # install another official release, no join code needed
+autoproxy-client remote-updates [on|off|status]
+                                        # allow or refuse updates requested from the panel
 autoproxy-client version
 ```
+
+`update` downloads `autoproxy-client.tar.gz` and `SHA256SUMS` from this project's GitHub release (the latest, or the
+one `--version` names), refuses on a checksum mismatch exactly as the installer does, replaces the script and the
+unit, and restarts the service, which leaves the tunnel untouched. It refuses a downgrade unless `--force` is given,
+and refuses in the Docker image (pull a new image instead). `AUTOPROXY_RELEASE_BASE` points it at a local mirror of a
+release directory for tests; it still checks the checksum and says loudly that it is set. Never use it outside a
+test.
+
+## Version reports and remote updates
+
+The script carries its release number (`AUTOPROXY_VERSION`, stamped by `scripts/package-client.sh` when a release is
+built; a checkout of the source says `dev`). While the tunnel is up, `run` sends it every two minutes to the agent's
+check-in route on the VPS's tunnel address, `https://10.66.66.1:<api port>/v1/tunnel/checkin`, from this machine's
+own tunnel address. The API port comes from the join code (agents from 0.3.0 put it there); a config written by an
+older client has none and 7443 is assumed, which `AUTOPROXY_API_PORT` in the service's environment overrides. There
+is no token on this route: the agent knows the client by its tunnel source address, which WireGuard ties to this
+peer's key, and the certificate is not checked (`curl -k`) because the client does not have it and the tunnel has
+already authenticated both ends. An agent older than 0.3.0 answers 401; the client logs that once and asks again six
+hours later or after a restart, so an old agent is not flooded with warnings.
+
+The answer may name a release the panel asked this client to install. The client starts `autoproxy-client update
+--version <that release>` in its own transient systemd unit (`autoproxy-client-update`, so the restart does not kill
+it) only when remote updates are on here, the release is newer than this one, and it has not tried that request yet;
+otherwise it reports why not. The next check-in carries the result: updating, updated, or failed with the reason.
+See [../docs/security.md](../docs/security.md).
 
 `status --json` is meant for the plugin and for your own monitoring; it reports the same fields as the
 human-readable output as a single JSON object.

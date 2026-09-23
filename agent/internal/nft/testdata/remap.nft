@@ -45,4 +45,9 @@ table inet autoproxy_rules {
 		ct state established,related accept
 		iifname "eth0" oifname "wg0" ct status dnat accept
 	}
+
+	chain tunnel_guard {
+		type filter hook input priority filter - 10; policy accept;
+		ip daddr 10.66.66.1 iifname != { "lo", "wg0" } drop
+	}
 }

@@ -199,7 +199,9 @@ open.
 ## API
 
 HTTPS on `0.0.0.0:7443` by default, TLS 1.3 minimum, `Authorization: Bearer
-<token>` on every route. Bodies are capped at 1 MiB. Errors are
+<token>` on every route. The one exception is `POST /v1/tunnel/checkin`, which
+answers only a connection to the VPS's tunnel address from a peer's own tunnel
+address (see below). Bodies are capped at 1 MiB. Errors are
 `{"error": "..."}`; rejected rule sets are `{"rejected":[{"id","reason"}]}`.
 
 The examples below use the documentation address `203.0.113.10`, the PEM the
@@ -217,9 +219,11 @@ curl() { command curl -sS --cacert ./agent.pem -H "Authorization: Bearer $AUTOPR
 | `POST /v1/peers` | create a peer → **201** with the join code (shown once) |
 | `DELETE /v1/peers/{id}` | remove a peer, its routes and its forwards → **204** |
 | `POST /v1/peers/{id}/rotate` | new keypair and a new join code |
+| `PUT /v1/peers/{id}/client` | ask that peer's client to install a release (0.3.0) |
 | `GET /v1/rules` | the rule set currently applied |
 | `PUT /v1/rules` | replace the whole rule set |
 | `POST /v1/token/rotate` | new bearer token, returned once and persisted |
+| `POST /v1/tunnel/checkin` | tunnel only, no token: a client reports its version (0.3.0) |
 
 ### `GET /v1/status`
 
@@ -320,6 +324,43 @@ does not exist.
 Pushing `{"rules":[]}` closes every forwarded port. That is the intended way to
 turn everything off.
 
+### Client versions and update requests (0.3.0)
+
+Every entry of `GET /v1/peers` carries a `client` object, always with every key,
+`null` until the client has said something:
+
+```json
+"client": {
+  "version": "0.3.0", "flavour": "systemd", "remote_updates": true,
+  "reported_at": "2026-09-23T20:26:04Z",
+  "desired_version": "0.3.1", "request_id": "f9863460755b", "requested_at": "2026-09-23T20:05:55Z",
+  "update": { "state": "failed", "version": "0.3.1", "error": "CHECKSUM MISMATCH: ...",
+              "request_id": "f9863460755b", "at": "2026-09-23T20:07:51Z" }
+}
+```
+
+`PUT /v1/peers/{id}/client` with `{"desired_version": "0.3.1"}` (a leading `v`
+is accepted and stripped; anything that is not `X.Y.Z` is a **422**) records the
+release the panel wants that client to run and mints a new `request_id`;
+`{"desired_version": null}` withdraws it. Unknown fields are a **400**, as on
+every token route. The agent stores only the number: the client fetches the
+release itself, from GitHub, and verifies it. When a client reports a version at
+or above the requested one, the request is cleared and `update.state` becomes
+`updated`.
+
+`POST /v1/tunnel/checkin` is what 0.3.0 clients call every two minutes, over the
+tunnel, at `https://10.66.66.1:7443` (the tunnel address and the API port):
+`{"version", "flavour", "remote_updates", "update": {"state", "version",
+"error", "request_id"}}` in, `{"desired_version", "request_id", "poll_s"}` out.
+It answers only when the connection's local address is the VPS's tunnel address
+and its source is a peer's tunnel address; anything else takes the token path
+(401 without the token, 404 with it). Its body is capped at 4 KiB and, unlike the
+token routes, unknown fields are ignored so a newer client can report to an
+older agent. It is not request-logged (every client calls it every two minutes);
+changes are logged instead. The chain `tunnel_guard` in the agent's own table
+drops anything addressed to the tunnel address that did not arrive on `wg0`.
+Client state lives in `/var/lib/autoproxy/clients.json`.
+
 ### Authentication and lockout
 
 Wrong tokens return **401**. Five failures from one address lock that address
@@ -352,7 +393,7 @@ would put it in `/proc/<pid>/cmdline` and every `ps` listing.
 | `AUTOPROXY_PUBLIC_IFACE` | `eth0` | the internet-facing interface, matched in the DNAT rules |
 | `AUTOPROXY_PUBLIC_IP` | — | this VPS's public IPv4, handed to clients in join codes |
 | `AUTOPROXY_RESERVED_PORTS` | `22,51820,7443` | public ports that may never be forwarded |
-| `AUTOPROXY_STATE_DIR` | `/var/lib/autoproxy` | holds `rules.json` and `peers.json` |
+| `AUTOPROXY_STATE_DIR` | `/var/lib/autoproxy` | holds `rules.json`, `peers.json` and `clients.json` |
 | `AUTOPROXY_RULES_FILE` | `/etc/autoproxy/rules.nft` | the file the agent owns and rewrites |
 | `AUTOPROXY_ENV_FILE` | `/etc/autoproxy/agent.env` | rewritten by token rotate |
 | `AUTOPROXY_TLS_CERT` / `_KEY` | `/etc/autoproxy/tls/agent.crt`, `.key` | TLS material |

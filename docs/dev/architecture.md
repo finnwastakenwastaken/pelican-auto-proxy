@@ -23,7 +23,8 @@ node host: autoproxy-client, systemd or Docker, real mode or site mode
   peer set, and the HTTPS API. One static binary, `autoproxy-agent`, subcommands `setup`, `show-code`, `uninstall`,
   `run`.
 - **`client/`** (bash + `wg` + `nft`): one script, `autoproxy-client`, for both the system-service and Docker
-  flavours. Subcommands `install`, `up`, `run`, `status`, `down`, `uninstall`.
+  flavours. Subcommands `install`, `up`, `run`, `status`, `down`, `uninstall`, `update`, `remote-updates`,
+  `version`.
 - **`installers/`**: thin wrappers (`install-vps.sh`, `install-client.sh`) — OS gate, download the pinned release
   asset, verify its checksum, run the real setup command. No logic that isn't in the binary/script itself lives
   here on purpose, so "what does the installer do" and "what does the software do once installed" are the same
@@ -33,8 +34,9 @@ node host: autoproxy-client, systemd or Docker, real mode or site mode
 
 ## API contract summary
 
-All routes require `Authorization: Bearer <token>`, including unknown paths — there is no unauthenticated endpoint,
-not even a health check. Body limit 1 MiB; unknown JSON fields are rejected rather than ignored, so a client typo
+All routes require `Authorization: Bearer <token>`, including unknown paths — there is no unauthenticated endpoint
+reachable from the internet, not even a health check. The single exception, `POST /v1/tunnel/checkin`, answers only
+through the tunnel; see "Client versions and remote updates" below. Body limit 1 MiB; unknown JSON fields are rejected rather than ignored, so a client typo
 never silently produces an unintended forward.
 
 | Method & path | Purpose |
@@ -47,6 +49,10 @@ never silently produces an unintended forward.
 | `DELETE /v1/peers/{id}` | Removes a peer live and its routes; any rule still targeting it is subsequently withheld, not silently redirected. |
 | `POST /v1/peers/{id}/rotate` | Rotates a single peer's key without changing its tunnel IP or mode. |
 | `POST /v1/token/rotate` | Issues a new API token, returned once; the old one stops working immediately. |
+| `PUT /v1/peers/{id}/client` | Records the client release the panel wants that peer to run (`{"desired_version": "X.Y.Z"}`, `null` withdraws), with a fresh request id. 0.3.0. |
+| `POST /v1/tunnel/checkin` | **No token, tunnel only.** A client reports its version, flavour, remote-update setting and last update result, and hears back the requested release. 0.3.0. |
+
+`GET /v1/peers` carries a `client` object per peer from 0.3.0 (every key always present, `null` until reported).
 
 Validation shared between the plugin and the agent (the agent re-validates independently — the plugin's checks are
 a UI convenience, not the security boundary): ports 1–65535; a port range end must be ≥ its start; a port range
@@ -75,7 +81,9 @@ cannot take SSH down with it.
   both the live table and the file untouched. It holds the DNAT maps (`tcp_addr`, `udp_addr`, `tcp_remap`,
   `udp_remap`), the `direct_targets` set, the `prerouting` DNAT chain, the `postrouting` masquerade chain, and the
   `forward` chain with policy `drop` and exactly two accepts — established/related, and
-  `iifname <public> oifname <tunnel> ct status dnat`. Declaring the table, then deleting it, then redefining it in
+  `iifname <public> oifname <tunnel> ct status dnat`. From 0.3.0 it also holds `tunnel_guard`, an `input` chain
+  with policy accept and one rule, `ip daddr <VPS tunnel IP> iifname != { "lo", <tunnel> } drop` (see "Client
+  versions and remote updates"). Declaring the table, then deleting it, then redefining it in
   the same transaction (never `flush table`) is required: `flush` empties chains but leaves set/map elements in
   place, so re-applying a changed range fails with "File exists," and an empty rule set would leave every
   previously-open port silently still open.
@@ -249,6 +257,52 @@ All three of the following apply it, because each covers a window the others do 
 `autoproxy-agent uninstall` removes the rule explicitly. It has to: the rule names a table and a fwmark, not the
 `wg0` device, so deleting the interface (which does drop every route that referenced it, in whatever table it was
 in) does not take the rule with it.
+
+## Client versions and remote updates
+
+Added in 0.3.0. Three moving parts, each with one job:
+
+- **The client reports.** While its handshake is fresh, `run` POSTs to `https://<VPS tunnel IP>:<API port>/v1/tunnel/
+  checkin` every `poll_s` seconds (120), from its own tunnel address (`curl --interface`), with `-k`: the join code
+  carries no certificate, and WireGuard has already authenticated both ends. The API port comes from the join code
+  (`api_port`, added without bumping the join-code version; older clients ignore it) or defaults to 7443. A 401 or
+  404 means an agent older than 0.3.0: logged once, retried after six hours (in memory, so a restart retries at once).
+  Other failures are logged once per failing streak.
+- **The agent identifies and records.** The API listener is bound to every address; a request under `/v1/tunnel/`
+  skips the token only when the connection's local address (`http.LocalAddrContextKey`) is the VPS's tunnel address
+  **and** the remote address is exactly one peer's tunnel address. Cryptokey routing makes that source address
+  proof of the peer's key: a peer's `AllowedIPs` are its `/32` plus, in site mode, RFC1918 LAN ranges that are refused
+  when they overlap the tunnel subnet. Everything else falls through to the token path. The body is decoded leniently
+  (a newer client may add fields), capped at 4 KiB, throttled to one per two seconds per peer, and validated field by
+  field; logging happens on change only. Records live in `clients.json` in the state directory, written on change or
+  at most every ten minutes, pruned when a peer is deleted.
+- **The client decides.** A check-in answer can name a release (`desired_version` + `request_id`). The client acts
+  only if its own remote-update switch is on (`/etc/autoproxy/remote-updates`, absent = on), the release is newer
+  than its own version, it is the system-service flavour, and it has not already acted on that request id. It then
+  runs `autoproxy-client update --version v<X.Y.Z> --remote --request-id <id>` in a transient unit
+  (`systemd-run --unit autoproxy-client-update --collect`), because the update restarts the very service that
+  started it. `update` downloads from the fixed GitHub release URL, verifies `SHA256SUMS` with the same function as
+  `install-client.sh` (a gate asserts they are byte-identical), renames the new script and unit into place, and
+  restarts; the restart takes the "already matches" path, so no rekey. Its status (`updating`, `updated`, `failed`
+  plus reason) goes to `/run/autoproxy-client/update-status` and rides the next check-in. The agent clears the
+  request when a report reaches or passes it and records `updated`.
+
+The firewall question. The base table (`inet autoproxy_base`, in `/etc/nftables.conf`, written only by setup)
+accepts `tcp dport <API port>` on every interface, so the check-in route is reachable through `wg0` on every existing
+install without touching that file. No new port was opened, on purpose: a new port would need an accept in the base
+table, which an existing install only gets by re-running setup, and an accept added from the agent's own table
+cannot override the base table's `policy drop` (every base chain at a hook must accept). A *drop* can be added from
+the agent's table, though, because a drop is final in any chain, and that is what `tunnel_guard` is: packets for the
+tunnel address are dropped unless they came in on the tunnel or loopback. It is rendered on every apply and on
+start, even with no rules, so a binary swap plus restart is the whole upgrade, and an older agent's first apply after
+a rollback removes it again. Measured on the test setup: with the guard, a machine on the VPS's LAN routing
+`10.66.66.1:7443` to the VPS's LAN address times out; with the guard removed, the same request reaches the listener
+and is still refused (401), because its source is not a peer.
+
+The plugin keeps only the admin's per-client "allow remote updates" switch (`autoproxy_client_updates`, default
+off); the version and request state live on the agent, the only side a client can reach. The latest release number
+comes from `release_url/update.json` (setting `latest_version_url` overrides it), cached for an hour, ten minutes
+after a failure.
 
 ## Security design
 

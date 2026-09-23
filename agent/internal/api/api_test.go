@@ -68,6 +68,7 @@ func newTest(t *testing.T, nftBin string) (*Server, http.Handler, string) {
 		RulesFile:   rulesFile,
 		EnvFile:     envFile,
 		Version:     "test",
+		TunnelIP:    netip.MustParseAddr("10.66.66.1"),
 	},
 		state.Store{Dir: dir},
 		nft.Applier{Bin: nftBin},

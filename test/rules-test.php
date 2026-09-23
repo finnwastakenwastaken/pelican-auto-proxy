@@ -65,9 +65,11 @@ require __DIR__ . '/../plugin/autoproxy/src/Services/RuleSetBuilder.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/PeerHealth.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/ForwardRuleInput.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/ClientInput.php';
+require __DIR__ . '/../plugin/autoproxy/src/Support/ClientVersion.php';
 
 use Arrowtje\AutoProxy\Services\RuleSetBuilder;
 use Arrowtje\AutoProxy\Support\ClientInput;
+use Arrowtje\AutoProxy\Support\ClientVersion;
 use Arrowtje\AutoProxy\Support\ForwardRuleInput;
 use Arrowtje\AutoProxy\Support\Ip;
 use Arrowtje\AutoProxy\Support\PeerHealth;
@@ -472,6 +474,73 @@ check('a LAN range without a prefix is refused',
     ClientInput::parse('office', '10.0.0.0')['error'] !== null);
 check('several LAN ranges are split and trimmed',
     ClientInput::parse(' office ', '10.0.0.0/24, 192.168.4.0/24') === ['name' => 'office', 'cidrs' => ['10.0.0.0/24', '192.168.4.0/24'], 'error' => null]);
+
+// --- client versions and updates (0.3.0) ------------------------------------
+//
+// To watch this gate fail on purpose, drop "&& $updateAvailable" from $canRemote
+// in ClientVersion::describe(): the "no button when up to date" check goes red.
+
+$now = strtotime('2026-09-23T12:00:00Z');
+$url = 'https://example.invalid/releases/latest/download';
+$peer = static fn (array $client): array => ['id' => 'p1', 'name' => 'wings-1', 'client' => $client + [
+    'version' => null, 'flavour' => null, 'remote_updates' => null, 'reported_at' => null,
+    'desired_version' => null, 'request_id' => null, 'requested_at' => null, 'update' => null,
+]];
+
+check('compare: 0.2.7 < 0.3.0', ClientVersion::compare('0.2.7', '0.3.0') === -1);
+check('compare: v0.10.0 > 0.9.9', ClientVersion::compare('v0.10.0', '0.9.9') === 1);
+check('compare: a development build does not compare', ClientVersion::compare('dev', '0.3.0') === null);
+
+$old = ClientVersion::describe(['id' => 'p1'], '0.3.0', true, $url, $now);
+check('an agent older than 0.3.0 (no "client" key) is named as the reason',
+    !$old['agent_supports'] && !$old['can_remote'] && str_contains($old['label'], 'VPS agent is older'));
+
+$unreported = ClientVersion::describe($peer([]), '0.3.0', true, $url, $now);
+check('a client that never reported gets the installer command without a join code',
+    $unreported['show_command'] && str_ends_with($unreported['command'], '/install-client.sh | sudo bash') && !$unreported['can_remote']);
+
+$outdated = ClientVersion::describe($peer(['version' => '0.3.0', 'flavour' => 'systemd', 'remote_updates' => true, 'reported_at' => '2026-09-23T11:59:00Z']), '0.3.1', true, $url, $now);
+check('an outdated 0.3.0 client: update available, update command, one-click allowed',
+    $outdated['update_available'] && $outdated['command'] === 'sudo autoproxy-client update' && $outdated['can_remote']);
+
+$notAllowed = ClientVersion::describe($peer(['version' => '0.3.0', 'flavour' => 'systemd']), '0.3.1', false, $url, $now);
+check('no one-click update while the admin has not allowed remote updates', !$notAllowed['can_remote']);
+
+$current = ClientVersion::describe($peer(['version' => '0.3.1', 'flavour' => 'systemd']), '0.3.1', true, $url, $now);
+check('no button and no command when up to date', !$current['can_remote'] && !$current['show_command'] && $current['tone'] === 'success');
+
+$docker = ClientVersion::describe($peer(['version' => '0.3.0', 'flavour' => 'docker']), '0.3.1', true, $url, $now);
+check('Docker: pull the image, never a one-click update',
+    !$docker['can_remote'] && str_contains($docker['command'], 'docker compose pull'));
+
+$refusing = ClientVersion::describe($peer(['version' => '0.3.0', 'flavour' => 'systemd', 'remote_updates' => false]), '0.3.1', true, $url, $now);
+check('a node that switched remote updates off says so and gets no button',
+    !$refusing['can_remote'] && str_contains((string) $refusing['remote_note'], 'remote-updates on'));
+
+$stale = ClientVersion::describe($peer(['version' => '0.3.0', 'reported_at' => '2026-09-23T10:00:00Z']), '0.3.0', true, $url, $now);
+check('an old report shows its age', str_contains($stale['label'], 'last reported 2 hours ago'));
+
+$requested = ClientVersion::progress(['desired_version' => '0.3.1', 'request_id' => 'r2', 'requested_at' => '2026-09-23T11:59:00Z',
+    'update' => ['state' => 'failed', 'version' => '0.3.1', 'error' => 'old failure', 'request_id' => 'r1', 'at' => '2026-09-23T11:00:00Z']], $now);
+check('progress: a new request is "requested", not the previous request\'s failure',
+    $requested !== null && str_starts_with($requested['text'], 'Update to 0.3.1 requested') && $requested['tone'] === 'warning');
+
+$failed = ClientVersion::progress(['desired_version' => '0.3.1', 'request_id' => 'r2',
+    'update' => ['state' => 'failed', 'version' => '0.3.1', 'error' => 'CHECKSUM MISMATCH', 'request_id' => 'r2', 'at' => '2026-09-23T11:58:00Z']], $now);
+check('progress: a failure for this request shows the client\'s own reason',
+    $failed !== null && $failed['tone'] === 'danger' && str_contains($failed['text'], 'CHECKSUM MISMATCH'));
+
+$updating = ClientVersion::progress(['desired_version' => '0.3.1', 'request_id' => 'r2',
+    'update' => ['state' => 'updating', 'version' => '0.3.1', 'error' => '', 'request_id' => 'r2', 'at' => '2026-09-23T11:59:30Z']], $now);
+check('progress: updating', $updating !== null && str_starts_with($updating['text'], 'Updating to 0.3.1'));
+
+$done = ClientVersion::progress(['version' => '0.3.1', 'update' => ['state' => 'updated', 'version' => '0.3.1', 'error' => '', 'request_id' => 'r2', 'at' => '2026-09-23T11:59:50Z']], $now);
+check('progress: updated', $done !== null && $done['tone'] === 'success' && str_contains($done['text'], 'Updated to 0.3.1'));
+
+check('progress: nothing to say', ClientVersion::progress([], $now) === null);
+
+check('progress: "updated" is dropped once the client runs another version (moved by hand since)',
+    ClientVersion::progress(['version' => '0.3.0', 'update' => ['state' => 'updated', 'version' => '0.3.4', 'error' => '', 'request_id' => 'r3', 'at' => '2026-09-23T11:00:00Z']], $now) === null);
 
 echo "\n$checks checks, $failures failure(s)\n";
 exit($failures === 0 ? 0 : 1);

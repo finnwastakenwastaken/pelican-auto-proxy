@@ -3,8 +3,17 @@
 # .sha256 file, for the release assets and for local testing of
 # installers/install-client.sh via AUTOPROXY_LOCAL_TARBALL.
 #
-# Usage: scripts/package-client.sh [output-path]
+# Usage: scripts/package-client.sh [output-path] [version]
 #   (default output: client/autoproxy-client.tar.gz)
+#   version: what the packaged script reports as its own version, e.g. 0.3.0
+#            (default: plugin/autoproxy/plugin.json's version with "-dev"
+#            appended, so a locally built tarball never passes for a release).
+#            The release workflow passes the tag's version.
+#
+# The script in the source tree says AUTOPROXY_VERSION="dev". The packaged copy
+# carries the real number, which is what "autoproxy-client status" shows, what
+# the client reports to the agent, and what "autoproxy-client update" compares
+# against before it will install anything.
 #
 # The layout is dictated by installers/install-client.sh, which extracts the
 # tarball into a scratch directory and then installs
@@ -19,6 +28,15 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="${1:-$root/client/autoproxy-client.tar.gz}"
+version="${2:-}"
+if [ -z "$version" ]; then
+	version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$root/plugin/autoproxy/plugin.json" | head -n1)-dev"
+fi
+version="${version#v}"
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+	echo "version '$version' is not X.Y.Z or X.Y.Z-suffix" >&2
+	exit 1
+fi
 
 # The name the release publishes and the name install-client.sh looks for inside
 # SHA256SUMS. The checksum line always carries this name, even when the archive
@@ -29,7 +47,20 @@ ASSET_NAME="autoproxy-client.tar.gz"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-cp "$root/client/autoproxy-client" "$workdir/"
+# Stamp exactly the one line the script reserves for this, and refuse to build
+# when it is not there: an unstamped release would call itself "dev" forever
+# and could never be compared with anything.
+stamp_line='readonly AUTOPROXY_VERSION="dev"'
+if [ "$(grep -cxF "$stamp_line" "$root/client/autoproxy-client")" -ne 1 ]; then
+	echo "client/autoproxy-client must contain exactly one line: $stamp_line" >&2
+	exit 1
+fi
+sed "s/^readonly AUTOPROXY_VERSION=\"dev\"\$/readonly AUTOPROXY_VERSION=\"${version}\"/" \
+	"$root/client/autoproxy-client" > "$workdir/autoproxy-client"
+if [ "$(grep -cxF "readonly AUTOPROXY_VERSION=\"${version}\"" "$workdir/autoproxy-client")" -ne 1 ]; then
+	echo "stamping the version into autoproxy-client failed" >&2
+	exit 1
+fi
 cp "$root/client/autoproxy-client.service" "$workdir/"
 chmod 0755 "$workdir/autoproxy-client"
 chmod 0644 "$workdir/autoproxy-client.service"
@@ -66,6 +97,14 @@ grep -qE "^[0-9a-f]{64}  ${ASSET_NAME}\$" "$out.sha256" || {
 	exit 1
 }
 
-echo "wrote $out"
+# Read the stamp back out of the archive, the way "autoproxy-client version"
+# will see it on a node.
+packed="$(tar -xzOf "$out" autoproxy-client | sed -n 's/^readonly AUTOPROXY_VERSION="\(.*\)"$/\1/p')"
+if [ "$packed" != "$version" ]; then
+	echo "the packaged script reports version '$packed', expected '$version'" >&2
+	exit 1
+fi
+
+echo "wrote $out (client version $version)"
 echo "wrote $out.sha256"
 tar -tvzf "$out" | sed 's/^/  /'

@@ -223,12 +223,20 @@ func runDaemon(args []string) {
 	if err != nil {
 		log.Warn("AUTOPROXY_PUBLIC_IP is not a plain IP address; lan_cidrs will not be checked against it", "value", *publicIP)
 	}
+	// The API port goes into every join code so a client knows where to check
+	// in over the tunnel. A listen address without a parseable port leaves it
+	// out, and the client falls back to the default 7443.
+	apiPort := 0
+	if _, p, err := net.SplitHostPort(*listen); err == nil {
+		apiPort = atoiOr(p, 0)
+	}
 	pm := peers.NewManager(peers.Config{
 		Subnet:    subnet,
 		VPSIP:     vpsTunnelIP,
 		Endpoint:  net.JoinHostPort(*publicIP, strconv.Itoa(*wgPort)),
 		PublicIP:  publicAddr,
 		VPSPubKey: wgPubKey,
+		APIPort:   apiPort,
 	}, peers.Store{Dir: *stateDir}, wgm, log)
 
 	srv := api.New(api.Config{
@@ -239,6 +247,7 @@ func runDaemon(args []string) {
 		RulesFile:   *rulesFile,
 		EnvFile:     *envFile,
 		Version:     version,
+		TunnelIP:    vpsTunnelIP,
 	},
 		state.Store{Dir: *stateDir},
 		nft.Applier{Bin: *nftBin},
@@ -254,7 +263,8 @@ func runDaemon(args []string) {
 		"wg_subnet", subnet.String(),
 		"reserved_ports", *reservedStr,
 		"rules_file", *rulesFile,
-		"state_dir", *stateDir)
+		"state_dir", *stateDir,
+		"tunnel_checkin", "https://"+net.JoinHostPort(vpsTunnelIP.String(), strconv.Itoa(apiPort))+"/v1/tunnel/checkin")
 
 	srv.Restore()
 

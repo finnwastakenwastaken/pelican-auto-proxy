@@ -4,11 +4,43 @@ Each of the three parts updates independently — you do not need to update the 
 the same time, though checking the [changelog](../CHANGELOG.md) for breaking notes before mixing old and new
 versions for long is worth the minute it takes.
 
+## Order: VPS agent, then plugin, then clients
+
+When a release touches all three (0.3.0 does), update in this order:
+
+1. **VPS agent** first. A newer agent keeps serving older clients and an older plugin exactly as before.
+2. **Plugin** next. It reads what the new agent offers; against an agent older than 0.3.0 it still works, and simply
+   says the agent has to be updated before client versions can be shown.
+3. **Tunnel clients** last. A 0.3.0 client against an older agent keeps forwarding normally; it only cannot report its
+   version (it tries once, writes one line to its log, and asks again six hours later or when it is restarted).
+
+Nothing here needs the node's join code, and no step disconnects players.
+
 ![The Plugins page with Pelican Auto Proxy installed](img/plugins.png)
 
 ## VPS agent
 
-Re-run the installer:
+**Upgrading from 0.2.x to 0.3.0 needs only the new binary and a restart.** Everything 0.3.0 adds on the VPS lives in
+the agent's own nftables table, which it rewrites whenever it starts, so `/etc/nftables.conf` does not change and
+setup does not have to run again. On the VPS as root:
+
+```bash
+cd /tmp
+curl -fsSLO https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/autoproxy-agent_linux_amd64
+curl -fsSLO https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS          # must print: autoproxy-agent_linux_amd64: OK
+cp -p /usr/local/bin/autoproxy-agent /usr/local/bin/autoproxy-agent.previous
+install -m 0755 autoproxy-agent_linux_amd64 /usr/local/bin/autoproxy-agent
+systemctl restart autoproxy-agent
+autoproxy-agent -version
+```
+
+Forwards and tunnels stay up across the restart; the agent re-applies both from its state on start. To go back,
+put `autoproxy-agent.previous` in place the same way and restart: an older agent rewrites its table without the
+0.3.0 additions, and ignores the client state file 0.3.0 added (`/var/lib/autoproxy/clients.json`).
+
+Re-running the installer also works, and is the way to pick up a change in how setup renders the base firewall or
+the units:
 
 ```bash
 curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-vps.sh | sudo bash
@@ -30,20 +62,49 @@ See [dev/release.md](dev/release.md) for how versions are tagged.
 
 ## Node client
 
-Same pattern, on each node host:
+No join code is needed. The panel's **Status** page shows every client's version and, when a newer release exists,
+the exact command for that machine with a Copy button. There are three ways to run it.
+
+**From 0.3.0 on**, on the node host:
 
 ```bash
-curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-client.sh | sudo bash -s -- <join code>
+sudo autoproxy-client update
 ```
 
-Re-run it with the **same** join code you used the first time: `install` always rewrites `/etc/autoproxy/client.json`
-and `/etc/wireguard/autoproxy0.conf` from whatever code you hand it, so the same code gives the same peer, the same
-keys and the same tunnel IP, and only the script and the unit are refreshed. Use a fresh code from the plugin only
-if you deliberately rotated that node's key — a rotate replaces the peer's keys, so the old code stops working.
-Re-running install does not prompt when it is piped from `curl` (no terminal attached); pass `--yes` if you want it
-non-interactive anywhere else, or `--no-start` to stage the update without restarting the tunnel.
-`AUTOPROXY_VERSION` pins the client the same way it pins the agent. For the Docker flavour, pull the new image tag
-and recreate the container; the same `AUTOPROXY_JOIN_CODE` environment variable keeps it tied to the same peer.
+It looks up the latest release, downloads `autoproxy-client.tar.gz` and `SHA256SUMS` from the same GitHub release the
+installer uses, refuses to install anything whose checksum does not match, replaces the script and the unit, and
+restarts the client. The restart leaves the tunnel alone (no rekey), so players stay connected; the output ends with
+"the tunnel was left untouched". Options:
+
+- `--version v0.3.1` installs that release instead of the latest.
+- It refuses a **downgrade** (and says so); add `--force` to go back to an older release deliberately.
+- `--no-restart` installs the files and leaves the running client alone until you restart it.
+
+**Clients older than 0.3.0** have no `update` command yet. Run the installer **without** a join code; on a machine
+that already has a client, that updates it in place and keeps its configuration and keys:
+
+```bash
+curl -fsSL https://github.com/finnwastakenwastaken/pelican-auto-proxy/releases/latest/download/install-client.sh | sudo bash
+```
+
+(Running the installer with the same join code as the first time still works too, and gives the same result.
+`AUTOPROXY_VERSION=v1.2.3` pins a release for either form.)
+
+**One click from the panel** (0.3.0 clients on the system-service flavour): on the Status page, press **Allow remote
+updates** for that client, then **Update to …**. The client picks the request up within about three minutes, runs the
+same update as above, and reports back; the Status and Setup pages show *requested*, then *updated*, or *failed* with
+the client's own reason (for example a checksum mismatch or an unreachable GitHub). Nothing is changed on the node
+when it fails. Remote updates are off until you allow them, and the node's owner can refuse them with
+`sudo autoproxy-client remote-updates off`; see [security.md](security.md) for exactly what this allows.
+
+**Docker flavour:** the container cannot replace itself. Pull the new image and recreate it, in the folder with its
+`compose.yml`:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+The same `AUTOPROXY_JOIN_CODE` in the compose file keeps it tied to the same peer.
 
 ## Plugin
 

@@ -155,7 +155,19 @@ func writeMap(sb *strings.Builder, name, valueType string, interval bool, es []e
 // address. Everything else leaving the tunnel is masqueraded, because a host
 // on a peer's LAN has no route back into the tunnel and would answer the
 // player directly from an address the player never wrote to.
-func Render(rs []rules.Resolved, publicIface, wgIface string, directTargets []string) string {
+//
+// guardAddr, when set, is the VPS's own tunnel address, and adds the
+// tunnel_guard chain: anything addressed to it that did not arrive on the
+// tunnel (or from this machine itself) is dropped. Tunnel clients reach the
+// agent's check-in route on that address without a token, and the agent
+// identifies them by their tunnel source address; this chain is what makes
+// "addressed to the tunnel address" mean "came through the tunnel" even for a
+// neighbour on the VPS's own network segment who could otherwise hand-route a
+// packet to it. It lives in this table, not the base firewall, so an existing
+// install gets it from a binary swap and a restart, without re-running setup.
+// A drop in any base chain at a hook is final, so this table can add it even
+// though it could never add an accept past the base table's policy drop.
+func Render(rs []rules.Resolved, publicIface, wgIface string, directTargets []string, guardAddr string) string {
 	tcp, udp := build(rs)
 	targets := append([]string{}, directTargets...)
 	sort.Strings(targets)
@@ -204,6 +216,13 @@ func Render(rs []rules.Resolved, publicIface, wgIface string, directTargets []st
 	sb.WriteString("\t\tct state established,related accept\n")
 	fmt.Fprintf(&sb, "\t\tiifname %q oifname %q ct status dnat accept\n", publicIface, wgIface)
 	sb.WriteString("\t}\n")
+	if guardAddr != "" {
+		sb.WriteString("\n")
+		sb.WriteString("\tchain tunnel_guard {\n")
+		sb.WriteString("\t\ttype filter hook input priority filter - 10; policy accept;\n")
+		fmt.Fprintf(&sb, "\t\tip daddr %s iifname != { \"lo\", %q } drop\n", guardAddr, wgIface)
+		sb.WriteString("\t}\n")
+	}
 	sb.WriteString("}\n")
 	return sb.String()
 }

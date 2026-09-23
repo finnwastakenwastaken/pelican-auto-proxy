@@ -11,7 +11,8 @@
 # is the Go agent under agent/; its WireGuard interface there is wg0, this
 # host's is autoproxy0, and the two must not be confused when reading either.
 #
-# Subcommands: install, up, run, status, down, uninstall, version.
+# Subcommands: install, up, run, status, down, uninstall, update,
+# remote-updates, version.
 # AUTOPROXY_RENDER_ONLY=1 skips executing main() so this file can be
 # `source`d by client/tests/test-render.sh to unit-test the pure render_*
 # and decode/json_get functions without touching the network or the
@@ -21,7 +22,10 @@ set -euo pipefail
 
 # --- constants ---------------------------------------------------------
 
-readonly AUTOPROXY_VERSION="0.1.0"
+# Stamped by scripts/package-client.sh when a release is built; a checkout of
+# the source says "dev". Do not edit this line by hand: the packaging script
+# replaces exactly this line and refuses to build when it cannot find it.
+readonly AUTOPROXY_VERSION="dev"
 readonly IFACE="autoproxy0"
 readonly FWMARK="0x2a"
 readonly RT_TABLE="200"
@@ -39,6 +43,39 @@ readonly SYSCTL_FILE="/etc/sysctl.d/90-autoproxy.conf"
 readonly BIN_PATH="/usr/local/bin/autoproxy-client"
 readonly UNIT_PATH="/etc/systemd/system/autoproxy-client.service"
 
+# Updates. The only place code is ever downloaded from is this project's own
+# GitHub release, verified against that release's SHA256SUMS, exactly as
+# installers/install-client.sh does. Nothing the VPS agent or the panel says
+# can change where it comes from: they can only name a release number.
+readonly REPO="finnwastakenwastaken/pelican-auto-proxy"
+readonly RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
+# Test-only override (a local mirror of a release directory, for a rig with no
+# published release to update to). Read from this machine's own environment
+# only; it still goes through the checksum check, and it is printed whenever
+# it is used. Never put it in an instruction for a user.
+readonly RELEASE_BASE="${AUTOPROXY_RELEASE_BASE:-https://github.com/${REPO}/releases/download}"
+# Node-side switch for updates requested from the panel. Absent means on: the
+# panel's per-node "allow remote updates" (default off) is the opt-in, this is
+# the node owner's hard off switch that no panel or API token can override.
+readonly REMOTE_UPDATES_FILE="${CONF_DIR}/remote-updates"
+# Runtime state that must survive a service restart but not a reboot: the
+# last update request this node acted on, and how the last update went.
+readonly RUN_DIR="/run/autoproxy-client"
+readonly UPDATE_STATUS_FILE="${RUN_DIR}/update-status"
+readonly UPDATE_REQUEST_FILE="${RUN_DIR}/update-request"
+readonly UPDATE_UNIT="autoproxy-client-update"
+
+# Check-ins: the client tells the agent its version over the tunnel, on the
+# VPS's tunnel address, and hears back which version the panel asked for.
+readonly DEFAULT_API_PORT=7443
+readonly CHECKIN_SECONDS=120
+# An agent older than 0.3.0 answers a check-in with 401 (it has no such
+# route and wants its token). Asking again every two minutes would put a
+# warning in that agent's journal every two minutes, so the client backs off.
+# Kept in memory on purpose: "systemctl restart autoproxy-client" right after
+# updating the agent makes the client report at once instead of hours later.
+readonly OLD_AGENT_BACKOFF_SECONDS=21600
+
 # --- globals set at runtime ---------------------------------------------
 
 HAVE_PYTHON3=0
@@ -54,6 +91,13 @@ MODE=""
 KEEPALIVE=""
 LAN_CIDRS=""
 HOST_IP=""
+API_PORT=""
+NEXT_CHECKIN=0
+CHECKIN_STATE=""
+US_STATE=""
+US_VERSION=""
+US_ERROR=""
+US_RID=""
 
 # --- logging -------------------------------------------------------------
 
@@ -240,7 +284,7 @@ validate_join_code() {
 render_client_json() {
     local v="$1" endpoint="$2" vps_wg_pubkey="$3" client_privkey="$4" client_address="$5" \
         tunnel_subnet="$6" vps_tunnel_ip="$7" mode="$8" keepalive="$9" \
-        lan_cidrs="${10}" host_ip="${11:-}"
+        lan_cidrs="${10}" host_ip="${11:-}" api_port="${12:-}"
     local lan_json="[" first=1 item
     if [[ -n "$lan_cidrs" ]]; then
         local IFS=','
@@ -268,7 +312,8 @@ render_client_json() {
   "mode": "${mode}",
   "lan_cidrs": ${lan_json},
   "keepalive": ${keepalive},
-  "host_ip": "${host_ip}"
+  "host_ip": "${host_ip}",
+  "api_port": "${api_port}"
 }
 EOF
 }
@@ -392,7 +437,7 @@ repath_due() {
 write_config_from_code() {
     local code="$1" host_ip="${2:-}"
     local json v endpoint vps_wg_pubkey client_privkey client_address tunnel_subnet
-    local vps_tunnel_ip mode keepalive lan_cidrs
+    local vps_tunnel_ip mode keepalive lan_cidrs api_port
 
     DECODE_METHOD="$(decode_method)"
     json="$(decode_join_code "$code")"
@@ -411,6 +456,10 @@ write_config_from_code() {
     # exactly v, endpoint, vps_wg_pubkey, client_privkey, client_address,
     # tunnel_subnet, vps_tunnel_ip, mode, lan_cidrs and keepalive.
     lan_cidrs="$(json_get "$json" lan_cidrs)"
+    # Agents from 0.3.0 add api_port, so the client knows where to check in
+    # over the tunnel. Older codes do not carry it; 7443 is assumed then.
+    api_port="$(json_get "$json" api_port)"
+    [[ "$api_port" =~ ^[0-9]{1,5}$ ]] || api_port=""
 
     validate_join_code "$v" "$endpoint" "$vps_wg_pubkey" "$client_privkey" "$client_address" \
         "$tunnel_subnet" "$vps_tunnel_ip" "$mode" "$keepalive"
@@ -419,7 +468,7 @@ write_config_from_code() {
     umask 077
 
     render_client_json "$v" "$endpoint" "$vps_wg_pubkey" "$client_privkey" "$client_address" \
-        "$tunnel_subnet" "$vps_tunnel_ip" "$mode" "$keepalive" "$lan_cidrs" "$host_ip" >"$CONF_FILE"
+        "$tunnel_subnet" "$vps_tunnel_ip" "$mode" "$keepalive" "$lan_cidrs" "$host_ip" "$api_port" >"$CONF_FILE"
     chmod 0600 "$CONF_FILE"
 
     render_wg_conf "$client_privkey" "$client_address" "$vps_wg_pubkey" "$endpoint" "$keepalive" 0 >"$WG_CONF_FILE"
@@ -453,6 +502,10 @@ load_config_fields() {
     KEEPALIVE="$(json_get "$json" keepalive)"
     LAN_CIDRS="$(json_get "$json" lan_cidrs)"
     HOST_IP="$(json_get "$json" host_ip)"
+    # AUTOPROXY_API_PORT overrides a config written by a client older than
+    # 0.3.0 (no api_port in it) on a VPS whose API is not on 7443.
+    API_PORT="${AUTOPROXY_API_PORT:-$(json_get "$json" api_port)}"
+    [[ "$API_PORT" =~ ^[0-9]{1,5}$ ]] || API_PORT="$DEFAULT_API_PORT"
 }
 
 # --- network apply/teardown (never run on the dev host; see CLAUDE.md #4) -
@@ -654,6 +707,448 @@ repath_tunnel() {
     log "no handshake for ${age}s: moved the tunnel to a new local port (${old} -> ${new}) in case the network path is stuck on the old one"
 }
 
+# --- version, check-in and update -------------------------------------------
+
+# "systemd" or "docker". The image sets AUTOPROXY_FLAVOUR=docker (see
+# client/Dockerfile); /.dockerenv covers an image built before that line.
+client_flavour() {
+    if [[ "${AUTOPROXY_FLAVOUR:-}" == "docker" || -f /.dockerenv ]]; then
+        echo "docker"
+    else
+        echo "systemd"
+    fi
+}
+
+# True unless the node owner switched remote updates off with
+# "autoproxy-client remote-updates off".
+remote_updates_enabled() {
+    [[ -f "$REMOTE_UPDATES_FILE" ]] || return 0
+    [[ "$(tr -d '[:space:]' <"$REMOTE_UPDATES_FILE" 2>/dev/null)" != "off" ]]
+}
+
+# Compares two versions X.Y.Z[-pre][+build], a leading "v" allowed. Prints -1,
+# 0 or 1. Returns 2 and prints nothing when either side does not parse (a
+# development copy says "dev"); callers must then not draw a conclusion. The
+# agent's Go twin is agent/internal/clients.Compare.
+version_cmp() {
+    local a="${1#v}" b="${2#v}"
+    local re='^([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9A-Za-z.-]+))?$'
+    a="${a%%+*}"
+    b="${b%%+*}"
+    [[ "$a" =~ $re ]] || return 2
+    local -a pa=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+    local apre="${BASH_REMATCH[5]}"
+    [[ "$b" =~ $re ]] || return 2
+    local -a pb=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+    local bpre="${BASH_REMATCH[5]}" i
+    for i in 0 1 2; do
+        if (( 10#${pa[i]} < 10#${pb[i]} )); then echo -1; return 0; fi
+        if (( 10#${pa[i]} > 10#${pb[i]} )); then echo 1; return 0; fi
+    done
+    if [[ "$apre" == "$bpre" ]]; then echo 0
+    elif [[ -z "$apre" ]]; then echo 1
+    elif [[ -z "$bpre" ]]; then echo -1
+    elif [[ "$apre" < "$bpre" ]]; then echo -1
+    else echo 1
+    fi
+}
+
+# A release number as a download needs it: X.Y.Z, a leading "v" allowed,
+# nothing else. It becomes part of a URL, so it stays boring on purpose.
+normalize_release() {
+    local v="${1:-}"
+    [[ "$v" =~ ^v?([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})$ ]] || return 1
+    echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+}
+
+json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s" | tr '\000-\037' ' '
+}
+
+# Reads UPDATE_STATUS_FILE into US_STATE, US_VERSION, US_ERROR, US_RID.
+read_update_status() {
+    US_STATE="" US_VERSION="" US_ERROR="" US_RID=""
+    [[ -f "$UPDATE_STATUS_FILE" ]] || return 0
+    local k v
+    while IFS='=' read -r k v; do
+        case "$k" in
+            state) US_STATE="$v" ;;
+            version) US_VERSION="$v" ;;
+            error) US_ERROR="$v" ;;
+            request_id) US_RID="$v" ;;
+        esac
+    done <"$UPDATE_STATUS_FILE"
+}
+
+# write_update_status <state> <version> <request id> [error]. The next
+# check-in carries it to the agent, which shows it in the panel.
+write_update_status() {
+    mkdir -p "$RUN_DIR"
+    local one_line
+    one_line="$(printf '%s' "${4:-}" | tr '\n\r' '  ' | cut -c1-280)"
+    printf 'state=%s\nversion=%s\nrequest_id=%s\nerror=%s\n' "$1" "$2" "$3" "$one_line" >"${UPDATE_STATUS_FILE}.tmp"
+    mv -f "${UPDATE_STATUS_FILE}.tmp" "$UPDATE_STATUS_FILE"
+}
+
+# checkin_body <version> <flavour> <remote_updates true|false> <state> <update version> <error> <request id>
+checkin_body() {
+    local body
+    body="{\"version\":\"$(json_escape "$1")\",\"flavour\":\"$(json_escape "$2")\",\"remote_updates\":$3"
+    if [[ -n "${4:-}" ]]; then
+        body+=",\"update\":{\"state\":\"$(json_escape "$4")\",\"version\":\"$(json_escape "${5:-}")\",\"error\":\"$(json_escape "${6:-}")\",\"request_id\":\"$(json_escape "${7:-}")\"}"
+    fi
+    printf '%s}' "$body"
+}
+
+# One check-in. Prints the agent's answer and returns 0; returns 3 when the
+# agent does not know the route (older than 0.3.0: 401, or 404), 1 on
+# anything else.
+#
+# Addressed to the VPS's tunnel address and sent from this machine's own, so
+# it travels inside WireGuard: the agent knows which peer is talking from the
+# source address alone, because WireGuard only delivers a packet from that
+# address if it was sealed with this peer's key. The agent's certificate is
+# not checked (-k) because this client does not have it (it is in the VPS
+# code, not the join code) and does not need it: the WireGuard session has
+# already authenticated both ends, and a man in the middle would have to be
+# inside the tunnel. Never point this at the public address.
+client_checkin() {
+    local body resp code
+    read_update_status
+    body="$(checkin_body "$AUTOPROXY_VERSION" "$(client_flavour)" \
+        "$(remote_updates_enabled && echo true || echo false)" \
+        "$US_STATE" "$US_VERSION" "$US_ERROR" "$US_RID")"
+    resp="$(curl -sS -k --interface "${CLIENT_ADDRESS%/*}" --connect-timeout 5 --max-time 10 \
+        -H 'Content-Type: application/json' --data "$body" -w '\n%{http_code}' \
+        "https://${VPS_TUNNEL_IP}:${API_PORT:-$DEFAULT_API_PORT}/v1/tunnel/checkin" 2>/dev/null)" || return 1
+    code="${resp##*$'\n'}"
+    resp="${resp%$'\n'*}"
+    case "$code" in
+        200) printf '%s' "$resp"; return 0 ;;
+        401|404) return 3 ;;
+        *) return 1 ;;
+    esac
+}
+
+# What to do about an update request. Pure, so client/tests/test-render.sh
+# can cover every branch. Prints "none", "run", or "refuse:<reason>".
+# remote_update_decision <desired> <request id> <own version> <flavour> <enabled 1|0> <last request id>
+remote_update_decision() {
+    local desired="$1" rid="$2" own="$3" flavour="$4" enabled="$5" last="$6" norm cmp
+    [[ -n "$desired" && -n "$rid" ]] || { echo none; return 0; }
+    # One attempt per request: pressing Update again in the panel is what
+    # mints a new request id, so a failure is not retried on its own every
+    # two minutes (hammering GitHub, or re-downloading a bad asset).
+    [[ "$rid" != "$last" ]] || { echo none; return 0; }
+    if ! norm="$(normalize_release "$desired")"; then
+        echo "refuse:the panel asked for '${desired}', which is not a release number"
+        return 0
+    fi
+    if cmp="$(version_cmp "$own" "$norm")" && (( cmp >= 0 )); then
+        echo none
+        return 0
+    fi
+    if [[ "$enabled" != "1" ]]; then
+        echo "refuse:remote updates are switched off on this node; run 'autoproxy-client remote-updates on' there to allow them"
+        return 0
+    fi
+    if [[ "$flavour" == "docker" ]]; then
+        echo "refuse:this node runs the Docker image, which cannot replace itself; pull the new image instead (docker compose pull && docker compose up -d)"
+        return 0
+    fi
+    echo run
+}
+
+# Acts on a desired version from a check-in answer: starts the same update
+# path as "autoproxy-client update", in its own transient unit. It cannot run
+# inside this service: restarting the service would kill it half-way.
+maybe_remote_update() {
+    local desired="$1" rid="$2" last="" decision norm out
+    [[ -f "$UPDATE_REQUEST_FILE" ]] && last="$(cat "$UPDATE_REQUEST_FILE" 2>/dev/null || true)"
+    decision="$(remote_update_decision "$desired" "$rid" "$AUTOPROXY_VERSION" "$(client_flavour)" \
+        "$(remote_updates_enabled && echo 1 || echo 0)" "$last")"
+    [[ "$decision" == "none" ]] && return 0
+
+    mkdir -p "$RUN_DIR"
+    printf '%s\n' "$rid" >"$UPDATE_REQUEST_FILE"
+    norm="$(normalize_release "$desired" || echo "$desired")"
+
+    if [[ "$decision" == refuse:* ]]; then
+        warn "the panel asked for an update to ${norm}; not starting it: ${decision#refuse:}"
+        write_update_status failed "$norm" "$rid" "${decision#refuse:}"
+        NEXT_CHECKIN=0
+        return 0
+    fi
+
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        write_update_status failed "$norm" "$rid" "systemd-run is not available on this node, so the update cannot run outside the service; run 'autoproxy-client update' there"
+        NEXT_CHECKIN=0
+        return 0
+    fi
+
+    log "the panel asked for an update to ${norm} (request ${rid}); starting it"
+    write_update_status updating "$norm" "$rid" ""
+    local -a env_args=()
+    [[ -n "${AUTOPROXY_RELEASE_BASE:-}" ]] && env_args+=("--setenv=AUTOPROXY_RELEASE_BASE=${AUTOPROXY_RELEASE_BASE}")
+    if ! out="$(systemd-run --unit="$UPDATE_UNIT" --collect --quiet "${env_args[@]}" \
+            "$BIN_PATH" update --version "v${norm}" --remote --request-id "$rid" 2>&1)"; then
+        warn "could not start the update: ${out}"
+        write_update_status failed "$norm" "$rid" "could not start the update: ${out}"
+    fi
+    NEXT_CHECKIN=0
+}
+
+# One step of the run loop's check-in schedule. Logs state changes only: a
+# line per check-in would bury the handshake lines, and an agent that is old
+# or unreachable would otherwise produce the same warning every two minutes.
+checkin_tick() {
+    local now="$1" resp="" rc=0 desired rid poll
+    resp="$(client_checkin)" || rc=$?
+    case "$rc" in
+        0)
+            case "$CHECKIN_STATE" in
+                ok) : ;;
+                "") log "reported version ${AUTOPROXY_VERSION} to the VPS agent" ;;
+                *) log "reporting to the VPS agent works again (version ${AUTOPROXY_VERSION})" ;;
+            esac
+            CHECKIN_STATE="ok"
+            desired="$(json_get "$resp" desired_version)"
+            rid="$(json_get "$resp" request_id)"
+            poll="$(json_get "$resp" poll_s)"
+            [[ "$poll" =~ ^[0-9]+$ ]] && (( poll >= 30 && poll <= 3600 )) || poll="$CHECKIN_SECONDS"
+            NEXT_CHECKIN=$(( now + poll ))
+            maybe_remote_update "$desired" "$rid"
+            ;;
+        3)
+            if [[ "$CHECKIN_STATE" != "old-agent" ]]; then
+                log "the VPS agent does not take version reports (it is older than 0.3.0, or did not recognise this machine's tunnel address); the panel will show no version for this node. Trying again in $(( OLD_AGENT_BACKOFF_SECONDS / 3600 )) hours, or at once after 'systemctl restart autoproxy-client'."
+            fi
+            CHECKIN_STATE="old-agent"
+            NEXT_CHECKIN=$(( now + OLD_AGENT_BACKOFF_SECONDS ))
+            ;;
+        *)
+            if [[ "$CHECKIN_STATE" != "failing" ]]; then
+                warn "could not report to the VPS agent at https://${VPS_TUNNEL_IP}:${API_PORT:-$DEFAULT_API_PORT} over the tunnel; retrying every ${CHECKIN_SECONDS}s without logging each attempt"
+            fi
+            CHECKIN_STATE="failing"
+            NEXT_CHECKIN=$(( now + CHECKIN_SECONDS ))
+            ;;
+    esac
+    return 0
+}
+
+# Verify "$1" (a bare filename) inside directory "$2" against "$2/SHA256SUMS".
+# Byte for byte the function in installers/install-client.sh (and checked by
+# scripts/test-checksum-parse.sh against the same fixture), so an update
+# accepts and refuses exactly what a fresh install does.
+# Returns 2 when there is nothing to check against, 1 on a mismatch, 0 on a match.
+verify_against_sha256sums() {
+    local asset="$1" dir="$2" line
+    [[ -f "$dir/SHA256SUMS" ]] || return 2
+    line="$(grep -E "^[0-9a-f]{64}[[:space:]]+[*]?${asset}\$" "$dir/SHA256SUMS")" || return 2
+    [[ "$(printf '%s\n' "$line" | wc -l)" -eq 1 ]] || return 2
+    ( cd "$dir" && printf '%s\n' "$line" | sha256sum -c --strict - >/dev/null )
+}
+
+UPD_REMOTE=0
+UPD_RID=""
+UPD_TARGET=""
+
+# Progress of an update the panel asked for, carried to the panel by the next
+# check-in. A run started by hand reports to the terminal only: a refusal the
+# admin just read there must not also turn the panel red.
+upd_status() {
+    (( UPD_REMOTE == 1 )) || return 0
+    write_update_status "$@"
+}
+
+# Refuses the update, says why, and (for a panel request) leaves the reason
+# where the next check-in will carry it to the panel.
+update_fail() {
+    err "$*"
+    err "nothing was changed; the running client is untouched"
+    upd_status failed "${UPD_TARGET:-?}" "$UPD_RID" "$*" 2>/dev/null || true
+    exit 1
+}
+
+cmd_update() {
+    local want="" force=0 restart=1
+    while (( $# > 0 )); do
+        case "$1" in
+            --version)
+                shift
+                want="${1:-}"
+                [[ -n "$want" ]] || { err "--version needs a value, e.g. --version v0.3.1"; exit 2; }
+                ;;
+            --force) force=1 ;;
+            --no-restart) restart=0 ;;
+            --remote) UPD_REMOTE=1 ;;
+            --request-id)
+                shift
+                UPD_RID="${1:-}"
+                ;;
+            *)
+                err "unknown update option: $1"
+                err "usage: autoproxy-client update [--version vX.Y.Z] [--force] [--no-restart]"
+                exit 2
+                ;;
+        esac
+        shift
+    done
+    need_root
+    # A request from the panel can never force: no downgrade, no reinstall.
+    (( UPD_REMOTE == 1 )) && force=0
+
+    if [[ "$(client_flavour)" == "docker" ]]; then
+        update_fail "this is the Docker image, which cannot replace itself. Pull the new image and recreate the container: docker compose pull && docker compose up -d"
+    fi
+    [[ -f "$CONF_FILE" ]] || update_fail "no client is installed here (${CONF_FILE} is missing); install it with the join command from the panel"
+    local tool
+    for tool in curl tar sha256sum flock; do
+        command -v "$tool" >/dev/null 2>&1 || update_fail "'${tool}' is not installed"
+    done
+
+    mkdir -p "$RUN_DIR"
+    exec 9>"${RUN_DIR}/update.lock"
+    flock -n 9 || update_fail "another update is already running on this node"
+
+    local target api_json tag
+    if [[ -n "$want" ]]; then
+        target="$(normalize_release "$want")" || update_fail "--version must be a release number like v0.3.1, not '${want}'"
+    else
+        log "looking up the latest release"
+        api_json="$(curl -fsSL --connect-timeout 10 --max-time 30 "$RELEASE_API" 2>&1)" \
+            || update_fail "could not reach GitHub to find the latest release (${api_json:0:200}). Pass --version vX.Y.Z to skip this step."
+        tag="$(printf '%s\n' "$api_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+        target="$(normalize_release "$tag")" || update_fail "GitHub named '${tag}' as the latest release, which is not a release number"
+    fi
+    UPD_TARGET="$target"
+    tag="v${target}"
+
+    local cmp
+    if cmp="$(version_cmp "$target" "$AUTOPROXY_VERSION")"; then
+        if (( cmp == 0 && force == 0 )); then
+            log "already on ${AUTOPROXY_VERSION}; nothing to do (--force reinstalls it)"
+            upd_status updated "$target" "$UPD_RID" ""
+            return 0
+        fi
+        if (( cmp < 0 && force == 0 )); then
+            update_fail "${tag} is older than the installed ${AUTOPROXY_VERSION}; refusing to downgrade (add --force to do it anyway)"
+        fi
+    else
+        warn "the installed client calls itself '${AUTOPROXY_VERSION}', not a release number (a development copy?), so a downgrade cannot be ruled out"
+    fi
+
+    upd_status updating "$target" "$UPD_RID" ""
+
+    local workdir
+    workdir="$(mktemp -d)"
+    # shellcheck disable=SC2064  # expand now: workdir is local to this function
+    trap "rm -rf '${workdir}'" EXIT
+
+    local url="${RELEASE_BASE}/${tag}"
+    if [[ -n "${AUTOPROXY_RELEASE_BASE:-}" ]]; then
+        warn "AUTOPROXY_RELEASE_BASE is set: downloading from ${url} instead of the GitHub release (test override; the checksum is still checked)"
+    fi
+    log "downloading autoproxy-client.tar.gz and SHA256SUMS from ${url}"
+    local out
+    out="$(curl -fsSL --connect-timeout 10 --max-time 120 -o "${workdir}/autoproxy-client.tar.gz" "${url}/autoproxy-client.tar.gz" 2>&1)" \
+        || update_fail "could not download ${url}/autoproxy-client.tar.gz (${out:0:200}). Is ${tag} a published release, and can this machine reach github.com?"
+    out="$(curl -fsSL --connect-timeout 10 --max-time 60 -o "${workdir}/SHA256SUMS" "${url}/SHA256SUMS" 2>&1)" \
+        || update_fail "could not download ${url}/SHA256SUMS (${out:0:200})"
+
+    log "verifying checksum"
+    local verify_rc=0
+    verify_against_sha256sums autoproxy-client.tar.gz "$workdir" || verify_rc=$?
+    if (( verify_rc == 2 )); then
+        update_fail "no usable SHA256SUMS entry for autoproxy-client.tar.gz in ${tag}; refusing to install an unverified download"
+    elif (( verify_rc != 0 )); then
+        rm -f "${workdir}/autoproxy-client.tar.gz"
+        update_fail "CHECKSUM MISMATCH: the downloaded autoproxy-client.tar.gz does not match ${tag}'s SHA256SUMS and was deleted. Do not retry blindly; report it at https://github.com/${REPO}/issues"
+    fi
+    log "checksum OK"
+
+    mkdir -p "${workdir}/x"
+    tar -xzf "${workdir}/autoproxy-client.tar.gz" -C "${workdir}/x" 2>/dev/null || update_fail "the downloaded tarball does not extract"
+    [[ -f "${workdir}/x/autoproxy-client" && -f "${workdir}/x/autoproxy-client.service" ]] \
+        || update_fail "the downloaded tarball does not contain autoproxy-client and autoproxy-client.service"
+    bash -n "${workdir}/x/autoproxy-client" 2>/dev/null || update_fail "the downloaded script does not parse (bash -n)"
+    local stamped stamped_norm
+    stamped="$(sed -n 's/^readonly AUTOPROXY_VERSION="\(.*\)"$/\1/p' "${workdir}/x/autoproxy-client" | head -n1)"
+    if stamped_norm="$(normalize_release "$stamped")" && [[ "$stamped_norm" != "$target" ]]; then
+        if [[ "$stamped_norm" == "0.1.0" ]]; then
+            log "releases before 0.3.0 do not carry their own version number; continuing"
+        else
+            update_fail "the downloaded script says it is ${stamped}, not ${target}; refusing"
+        fi
+    fi
+
+    # Rename into place, never overwrite in place: bash reads a script as it
+    # runs, and the service is running this very file.
+    install -m 0755 "${workdir}/x/autoproxy-client" "${BIN_PATH}.new"
+    mv -f "${BIN_PATH}.new" "$BIN_PATH"
+    install -m 0644 "${workdir}/x/autoproxy-client.service" "${UNIT_PATH}.new"
+    mv -f "${UNIT_PATH}.new" "$UNIT_PATH"
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload
+    log "installed ${tag} (was ${AUTOPROXY_VERSION}); configuration and keys untouched"
+
+    if (( restart == 0 )); then
+        log "not restarted (--no-restart); run 'systemctl restart autoproxy-client' to switch to it"
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1 || ! systemctl is-active --quiet autoproxy-client.service; then
+        upd_status updated "$target" "$UPD_RID" ""
+        log "the autoproxy-client service is not running, so nothing was restarted; start it with 'systemctl start autoproxy-client'"
+        return 0
+    fi
+
+    local since journal="" i
+    since="$(date '+%Y-%m-%d %H:%M:%S')"
+    log "restarting autoproxy-client (the tunnel stays up: a restart does not rekey it)"
+    systemctl restart autoproxy-client.service || update_fail "installed ${tag}, but 'systemctl restart autoproxy-client' failed; see journalctl -u autoproxy-client"
+    for i in $(seq 1 30); do
+        sleep 1
+        journal="$(journalctl -u autoproxy-client.service --since "$since" -o cat --no-pager 2>/dev/null || true)"
+        grep -q 'up: complete' <<<"$journal" && break
+    done
+    if grep -q 'leaving the live session untouched' <<<"$journal"; then
+        log "restarted on ${tag}; the tunnel was left untouched (no rekey, players stay connected)"
+    elif grep -q 'this rekeys the tunnel' <<<"$journal"; then
+        warn "restarted on ${tag}, but the tunnel configuration differed and was re-applied (a rekey: players may have seen a few seconds of loss)"
+    elif ! grep -q 'up: complete' <<<"$journal"; then
+        warn "restarted, but the service did not report 'up: complete' within 30 s; check journalctl -u autoproxy-client"
+    fi
+    upd_status updated "$target" "$UPD_RID" ""
+    log "update complete: $("$BIN_PATH" version)"
+}
+
+cmd_remote_updates() {
+    case "${1:-status}" in
+        on)
+            need_root
+            mkdir -p "$CONF_DIR"
+            printf 'on\n' >"$REMOTE_UPDATES_FILE"
+            log "remote updates on: when the panel asks, this node installs that newer official release (checksum-verified, never a downgrade)"
+            ;;
+        off)
+            need_root
+            mkdir -p "$CONF_DIR"
+            printf 'off\n' >"$REMOTE_UPDATES_FILE"
+            log "remote updates off: update requests from the panel are refused, and the refusal is shown there"
+            ;;
+        status)
+            remote_updates_enabled && echo on || echo off
+            ;;
+        *)
+            err "usage: autoproxy-client remote-updates [on|off|status]"
+            exit 2
+            ;;
+    esac
+}
+
 # --- run (systemd ExecStart / Docker entrypoint) ---------------------------
 
 cmd_run() {
@@ -700,6 +1195,12 @@ cmd_run() {
         if (( age >= STALE_SECONDS )); then
             err "no handshake within ${STALE_SECONDS}s; exiting so the service manager restarts us"
             exit 1
+        fi
+
+        # Only through a live tunnel: the check-in goes to the VPS's tunnel
+        # address, so without a handshake it could only time out.
+        if (( age < REPATH_SECONDS && now >= NEXT_CHECKIN )); then
+            checkin_tick "$now"
         fi
 
         transfer="$(wg_transfer_human)"
@@ -753,13 +1254,18 @@ cmd_status() {
     fwd="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo unknown)"
     rp="$(cat "/proc/sys/net/ipv4/conf/${IFACE}/rp_filter" 2>/dev/null || echo unknown)"
 
+    local flavour remote
+    flavour="$(client_flavour)"
+    remote="$(remote_updates_enabled && echo on || echo off)"
+
     local healthy=0
     if [[ $iface_up -eq 1 && $nft_ok -eq 1 && $rule_ok -eq 1 && "$hs_age" != "null" ]] && (( hs_age < STALE_SECONDS )); then
         healthy=1
     fi
 
     if [[ $json -eq 1 ]]; then
-        printf '{"configured":%s,"mode":"%s","endpoint":"%s","keepalive":"%s","interface":"%s","interface_up":%s,"handshake_age_seconds":%s,"transfer":"%s","nft_table":%s,"ip_rule":%s,"docker_user":"%s","ip_forward":"%s","rp_filter":"%s","healthy":%s}\n' \
+        printf '{"version":"%s","flavour":"%s","remote_updates":%s,"configured":%s,"mode":"%s","endpoint":"%s","keepalive":"%s","interface":"%s","interface_up":%s,"handshake_age_seconds":%s,"transfer":"%s","nft_table":%s,"ip_rule":%s,"docker_user":"%s","ip_forward":"%s","rp_filter":"%s","healthy":%s}\n' \
+            "$AUTOPROXY_VERSION" "$flavour" "$([[ "$remote" == "on" ]] && echo true || echo false)" \
             "$([[ $configured -eq 1 ]] && echo true || echo false)" \
             "$MODE" "$ENDPOINT" "$KEEPALIVE" \
             "$IFACE" \
@@ -771,6 +1277,7 @@ cmd_status() {
             "$docker_state" "$fwd" "$rp" \
             "$([[ $healthy -eq 1 ]] && echo true || echo false)"
     else
+        echo "version:      ${AUTOPROXY_VERSION} (${flavour}; remote updates ${remote})"
         if [[ $configured -eq 1 ]]; then
             echo "mode:         ${MODE} (peer ${ENDPOINT}, keepalive ${KEEPALIVE}s)"
             echo "peer pubkey:  ${VPS_WG_PUBKEY}"
@@ -956,7 +1463,8 @@ EOF
         systemctl disable --now autoproxy-client.service 2>/dev/null || true
     fi
     teardown_network
-    rm -f "$UNIT_PATH" "$CONF_FILE" "$WG_CONF_FILE" "$SYSCTL_FILE"
+    rm -f "$UNIT_PATH" "$CONF_FILE" "$WG_CONF_FILE" "$SYSCTL_FILE" "$REMOTE_UPDATES_FILE"
+    rm -rf "$RUN_DIR"
     rmdir "$CONF_DIR" 2>/dev/null || true
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload 2>/dev/null || true
@@ -991,6 +1499,14 @@ commands:
   status [--json]        exit 0 if healthy, 1 otherwise
   down                   tear down everything up/run created
   uninstall [--yes]      remove files, unit, sysctl config and network state
+  update [--version vX.Y.Z] [--force] [--no-restart]
+                         install another official release (default: the
+                         latest), checksum-verified, without a rekey; refuses
+                         a downgrade unless --force. No join code needed.
+  remote-updates [on|off|status]
+                         allow or refuse updates requested from the panel
+                         (default on; the panel's per-node switch is off
+                         until an admin turns it on)
   version
 EOF
 }
@@ -1012,6 +1528,8 @@ main() {
         status) cmd_status "$@" ;;
         down) need_root; cmd_down ;;
         uninstall) cmd_uninstall "$@" ;;
+        update) cmd_update "$@" ;;
+        remote-updates) cmd_remote_updates "$@" ;;
         version) cmd_version ;;
         ""|-h|--help) usage ;;
         *)

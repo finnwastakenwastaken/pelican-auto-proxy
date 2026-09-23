@@ -73,7 +73,7 @@ func resolve(t *testing.T, rs []rules.Rule) []rules.Resolved {
 func TestRenderGolden(t *testing.T) {
 	for name, rs := range goldens {
 		t.Run(name, func(t *testing.T) {
-			got := Render(resolve(t, rs), "eth0", "wg0", directTargets)
+			got := Render(resolve(t, rs), "eth0", "wg0", directTargets, "10.66.66.1")
 			path := filepath.Join("testdata", name+".nft")
 			if *update {
 				if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -96,7 +96,7 @@ func TestRenderGolden(t *testing.T) {
 }
 
 func TestRenderIsATransaction(t *testing.T) {
-	got := Render(resolve(t, goldens["mixed"]), "eth0", "wg0", directTargets)
+	got := Render(resolve(t, goldens["mixed"]), "eth0", "wg0", directTargets, "10.66.66.1")
 	lines := strings.Split(got, "\n")
 	var meaningful []string
 	for _, l := range lines {
@@ -125,7 +125,7 @@ func TestRenderDeduplicatesAndSorts(t *testing.T) {
 		{ID: "a", Proto: "tcp", PublicPort: 9000, TargetIP: "10.0.0.10", ViaPeer: "site1"},
 		{ID: "a", Proto: "tcp", PublicPort: 9000, TargetIP: "10.0.0.10", ViaPeer: "site1"},
 	}
-	got := Render(resolve(t, rs), "eth0", "wg0", nil)
+	got := Render(resolve(t, rs), "eth0", "wg0", nil, "10.66.66.1")
 	if strings.Count(got, "9000 : 10.0.0.10") != 1 {
 		t.Fatalf("duplicate element rendered twice:\n%s", got)
 	}
@@ -135,7 +135,7 @@ func TestRenderDeduplicatesAndSorts(t *testing.T) {
 }
 
 func TestRenderUsesTheGivenInterfaces(t *testing.T) {
-	got := Render(nil, "ens3", "wgx", nil)
+	got := Render(nil, "ens3", "wgx", nil, "10.66.66.1")
 	if !strings.Contains(got, `iifname "ens3"`) || !strings.Contains(got, `oifname "wgx"`) {
 		t.Fatalf("interfaces not substituted:\n%s", got)
 	}
@@ -152,7 +152,7 @@ func TestCount(t *testing.T) {
 }
 
 func TestEmptyRenderHasNoElements(t *testing.T) {
-	got := Render(nil, "eth0", "wg0", nil)
+	got := Render(nil, "eth0", "wg0", nil, "10.66.66.1")
 	if strings.Contains(got, "elements") {
 		t.Fatalf("an empty rule set must not emit an elements block:\n%s", got)
 	}
@@ -171,7 +171,7 @@ func TestEmptyRenderHasNoElements(t *testing.T) {
 // exclusion, every player arrives at the game server as the VPS, IP bans and
 // per-player limits stop working, and nothing else looks broken.
 func TestRealIPTargetsAreNotMasqueraded(t *testing.T) {
-	got := Render(resolve(t, goldens["real-ip"]), "eth0", "wg0", directTargets)
+	got := Render(resolve(t, goldens["real-ip"]), "eth0", "wg0", directTargets, "10.66.66.1")
 	if !strings.Contains(got, `oifname "wg0" ip daddr != @direct_targets masquerade`) {
 		t.Fatalf("the masquerade rule must exclude @direct_targets:\n%s", got)
 	}
@@ -189,7 +189,7 @@ func TestRealIPTargetsAreNotMasqueraded(t *testing.T) {
 // points at: a peer with no forwards yet still must not be masqueraded the
 // moment its first rule lands.
 func TestDirectTargetsCoverPeersWithoutRules(t *testing.T) {
-	got := Render(nil, "eth0", "wg0", []string{"10.66.66.9"})
+	got := Render(nil, "eth0", "wg0", []string{"10.66.66.9"}, "10.66.66.1")
 	if !strings.Contains(got, "elements = { 10.66.66.9 }") {
 		t.Fatalf("direct_targets must list peers even with no rules:\n%s", got)
 	}
@@ -238,7 +238,7 @@ func TestForwardPolicyIsDrop(t *testing.T) {
 	// Nothing crosses this box unless we DNAT'd it. Every base chain at a hook
 	// must accept for a packet to pass, so this policy is only safe because
 	// setup removes orphaned Docker tables that also sit at the forward hook.
-	got := Render(resolve(t, goldens["mixed"]), "eth0", "wg0", directTargets)
+	got := Render(resolve(t, goldens["mixed"]), "eth0", "wg0", directTargets, "10.66.66.1")
 	if !strings.Contains(got, "type filter hook forward priority filter; policy drop;") {
 		t.Fatalf("forward chain must have policy drop:\n%s", got)
 	}
@@ -251,5 +251,23 @@ func TestForwardPolicyIsDrop(t *testing.T) {
 	}
 	if !strings.Contains(got, `iifname "eth0" oifname "wg0" ct status dnat accept`) {
 		t.Fatalf("new DNAT'd sessions would be dropped without this accept:\n%s", got)
+	}
+}
+
+// The tunnel check-in route has no token; what makes that safe is that only a
+// packet that came through the tunnel can be addressed to the tunnel address.
+// If this chain loses the drop, or starts dropping the tunnel interface
+// itself, either the guard is gone or every check-in is.
+func TestTunnelGuardDropsTunnelAddressFromOutsideTheTunnel(t *testing.T) {
+	got := Render(nil, "eth0", "wg0", nil, "10.66.66.1")
+	want := `ip daddr 10.66.66.1 iifname != { "lo", "wg0" } drop`
+	if !strings.Contains(got, "chain tunnel_guard {") || !strings.Contains(got, want) {
+		t.Fatalf("tunnel_guard missing or wrong, want %q in:\n%s", want, got)
+	}
+	if !strings.Contains(got, "type filter hook input priority filter - 10; policy accept;") {
+		t.Fatalf("tunnel_guard must be an input chain with policy accept (it only ever adds a drop):\n%s", got)
+	}
+	if strings.Contains(Render(nil, "eth0", "wg0", nil, ""), "tunnel_guard") {
+		t.Fatalf("no guard address must mean no guard chain")
 	}
 }

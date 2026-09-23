@@ -53,6 +53,7 @@ echo ">> starting the agent (--network none, NET_ADMIN)"
 docker run -d --name "$AGENT_CT" --network none --cap-add NET_ADMIN \
 	-v "$BIN:/agent:ro" \
 	-v "$HERE/agent-in-container.sh:/run.sh:ro" \
+	-v "$REPO_ROOT/client:/client:ro" \
 	-v "$SHARED:/shared" \
 	"$IMAGE" bash /run.sh >/dev/null
 
@@ -88,6 +89,13 @@ set -e
 
 if [ "$jc" -ne 0 ]; then
 	rc="$jc"
+fi
+
+echo
+echo ">> tunnel check-in (the real client's code against the real agent)"
+cat "$SHARED/tunnel-checks"
+if grep -q '^FAIL' "$SHARED/tunnel-checks" || ! grep -q '^PASS' "$SHARED/tunnel-checks"; then
+	rc=1
 fi
 
 touch "$SHARED/done"

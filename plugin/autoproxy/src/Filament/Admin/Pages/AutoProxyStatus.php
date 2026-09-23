@@ -4,12 +4,15 @@ namespace Arrowtje\AutoProxy\Filament\Admin\Pages;
 
 use App\Models\Node;
 use Arrowtje\AutoProxy\Exceptions\AutoProxyException;
+use Arrowtje\AutoProxy\Models\ClientUpdate;
 use Arrowtje\AutoProxy\Models\NodeSetting;
 use Arrowtje\AutoProxy\Models\SyncState;
 use Arrowtje\AutoProxy\Services\AgentClient;
+use Arrowtje\AutoProxy\Services\LatestRelease;
 use Arrowtje\AutoProxy\Services\SyncService;
 use Arrowtje\AutoProxy\Filament\Admin\Widgets\StaleSyncBanner;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
+use Arrowtje\AutoProxy\Support\ClientVersion;
 use Arrowtje\AutoProxy\Support\PeerHealth;
 use BackedEnum;
 use Filament\Actions\Action;
@@ -69,6 +72,7 @@ class AutoProxyStatus extends Page
             Action::make('sync')
                 ->label('Sync now')
                 ->icon('tabler-refresh')
+                ->button()
                 ->action(function (): void {
                     $result = app(SyncService::class)->run(true);
 
@@ -83,6 +87,7 @@ class AutoProxyStatus extends Page
             Action::make('test')
                 ->label('Test VPS')
                 ->icon('tabler-plug')
+                ->button()
                 ->color('gray')
                 ->action(function (): void {
                     try {
@@ -110,6 +115,176 @@ class AutoProxyStatus extends Page
         ];
     }
 
+    // --- client updates ------------------------------------------------------
+
+    /**
+     * Livewire calls these with whatever arguments the browser sends, and a page's
+     * canAccess() is only checked when it is first opened, so every action here
+     * checks again rather than trusting that.
+     */
+    protected function guard(): void
+    {
+        abort_unless(static::canAccess(), 403);
+    }
+
+    /** @return array<string, mixed>|null the peer as the VPS reports it now */
+    protected function livePeer(string $peerId): ?array
+    {
+        try {
+            foreach (app(AgentClient::class)->peers() as $peer) {
+                if ((string) ($peer['id'] ?? '') === $peerId) {
+                    return $peer;
+                }
+            }
+        } catch (AutoProxyException $exception) {
+            $this->notify('The VPS did not answer', $exception->getMessage(), false);
+
+            return null;
+        }
+
+        $this->notify('Unknown tunnel client', 'The VPS does not know that client any more.', false);
+
+        return null;
+    }
+
+    public function allowRemoteUpdates(string $peerId): void
+    {
+        $this->guard();
+
+        if ($this->livePeer($peerId) === null) {
+            return;
+        }
+
+        ClientUpdate::setAllowed($peerId, true);
+        $this->notify('Remote updates allowed', 'This client can now be updated from this page. Nothing is installed until you press Update.', true);
+    }
+
+    /**
+     * Switching off also withdraws a pending request on the VPS, and refuses to
+     * flip the switch if the VPS cannot be told: a switch that reads "off" while
+     * a request is still waiting on the VPS would be a lie.
+     */
+    public function disallowRemoteUpdates(string $peerId): void
+    {
+        $this->guard();
+        $peer = $this->livePeer($peerId);
+
+        if ($peer === null) {
+            return;
+        }
+
+        if (($peer['client']['desired_version'] ?? null) !== null) {
+            try {
+                app(AgentClient::class)->setClientVersion($peerId, null);
+            } catch (AutoProxyException $exception) {
+                $this->notify('Could not withdraw the pending update', $exception->getMessage() . ' Remote updates stay on until the VPS can be told.', false);
+
+                return;
+            }
+        }
+
+        ClientUpdate::setAllowed($peerId, false);
+        $this->notify('Remote updates off', 'This client will not be asked to update from here.', true);
+    }
+
+    public function requestClientUpdate(string $peerId): void
+    {
+        $this->guard();
+
+        if (!ClientUpdate::isAllowed($peerId)) {
+            $this->notify('Remote updates are off for this client', 'Allow them first.', false);
+
+            return;
+        }
+
+        $peer = $this->livePeer($peerId);
+
+        if ($peer === null) {
+            return;
+        }
+
+        $latest = LatestRelease::version();
+        $info = ClientVersion::describe($peer, $latest, true, AutoProxySettings::releaseUrl(), time());
+
+        if (!$info['can_remote'] || $latest === null) {
+            $this->notify('This client cannot be updated from here right now', $info['remote_note'] ?? ('It already runs ' . ($info['version'] ?? '?') . '.'), false);
+
+            return;
+        }
+
+        try {
+            app(AgentClient::class)->setClientVersion($peerId, $latest);
+        } catch (AutoProxyException $exception) {
+            $this->notify('The VPS did not take the request', $exception->getMessage(), false);
+
+            return;
+        }
+
+        $this->notify('Update requested', 'The client installs ' . $latest . ' at its next check-in, within about three minutes. Progress shows here.', true);
+    }
+
+    public function withdrawClientUpdate(string $peerId): void
+    {
+        $this->guard();
+
+        try {
+            app(AgentClient::class)->setClientVersion($peerId, null);
+        } catch (AutoProxyException $exception) {
+            $this->notify('Could not withdraw the request', $exception->getMessage(), false);
+
+            return;
+        }
+
+        $this->notify('Request withdrawn', 'An update that already started finishes; one that has not is not started.', true);
+    }
+
+    public function checkLatestRelease(): void
+    {
+        $this->guard();
+        LatestRelease::forget();
+        $latest = LatestRelease::get();
+
+        $latest['version'] !== null
+            ? $this->notify('Latest release: ' . $latest['version'], 'Looked up at ' . LatestRelease::url(), true)
+            : $this->notify('Could not look up the latest release', (string) $latest['error'], false);
+    }
+
+    protected function notify(string $title, string $body, bool $ok): void
+    {
+        $notification = Notification::make()->title($title)->body($body);
+        $ok ? $notification->success() : $notification->danger()->persistent();
+        $notification->send();
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $peers
+     * @param array<string, string> $names
+     * @return array<int, array<string, mixed>>
+     */
+    protected function clientRows(array $peers, array $names, ?string $latest): array
+    {
+        $allowed = ClientUpdate::allowedMap();
+        $rows = [];
+
+        foreach ($peers as $peer) {
+            $id = (string) ($peer['id'] ?? '');
+
+            if ($id === '') {
+                continue;
+            }
+
+            $rows[] = [
+                'id' => $id,
+                'name' => (string) ($peer['name'] ?? $id),
+                'node' => $names[$id] ?? null,
+                'allowed' => $allowed[$id] ?? false,
+                'info' => ClientVersion::describe($peer, $latest, $allowed[$id] ?? false, AutoProxySettings::releaseUrl(), time()),
+            ];
+        }
+
+        return $rows;
+    }
+
     protected function getViewData(): array
     {
         $state = SyncState::current();
@@ -133,14 +308,20 @@ class AutoProxyStatus extends Page
             }
         }
 
+        $names = $this->peerNodeNames();
+        $latest = AutoProxySettings::isConnected() ? LatestRelease::get() : ['version' => null, 'error' => null];
+
         return [
+            'clientRows' => $this->clientRows($peers, $names, $latest['version']),
+            'latestRelease' => $latest['version'],
+            'latestError' => $latest['error'],
             'state' => $state,
             'connected' => AutoProxySettings::isConnected(),
             'agentStatus' => $agentStatus,
             'agentError' => $agentError,
             'peers' => $peers,
             'peerError' => $peerError,
-            'peerNodeNames' => $this->peerNodeNames(),
+            'peerNodeNames' => $names,
             'setupUrl' => Setup::getUrl(),
             'apiUrl' => AutoProxySettings::apiUrl(),
             'publicAddress' => AutoProxySettings::publicAddress(),

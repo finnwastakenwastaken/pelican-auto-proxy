@@ -83,6 +83,11 @@ type JoinCode struct {
 	Mode         string   `json:"mode"`
 	LANCIDRs     []string `json:"lan_cidrs,omitempty"`
 	Keepalive    int      `json:"keepalive"`
+	// APIPort is the agent's API port, which a client 0.3.0 or newer uses to
+	// check in over the tunnel (on VPSTunnelIP, never the public address).
+	// Added in 0.3.0 without bumping V: older clients ignore keys they do not
+	// know, and a client given a code without it assumes 7443.
+	APIPort int `json:"api_port,omitempty"`
 }
 
 // Encode renders the join code as one base64url token, unpadded so it survives

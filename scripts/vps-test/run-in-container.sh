@@ -203,6 +203,21 @@ fi
 API="https://$IP:$APIPORT"
 c() { curl -sS --cacert /tmp/agent.pem -H "Authorization: Bearer $TOKEN" "$@"; }
 
+step "tunnel guard (0.3.0): in the agent's own table, never in the base firewall"
+# Rendered at start even with no rules, so it never waits for the panel's first
+# push; and it lives in inet autoproxy_rules, so an existing install gets it
+# from a binary swap without setup rewriting /etc/nftables.conf.
+if nft list chain inet autoproxy_rules tunnel_guard 2>/dev/null | grep -qE 'ip daddr 10\.66\.66\.1 iifname != \{ "lo", "wg0" \} drop'; then
+	ok "tunnel_guard drops the tunnel address from anywhere but lo and wg0"
+else
+	bad "tunnel_guard missing or wrong"; nft list table inet autoproxy_rules 2>&1 | tail -12
+fi
+if grep -q tunnel_guard /etc/nftables.conf; then
+	bad "the base firewall file mentions tunnel_guard (setup must not have to change for this)"
+else
+	ok "the base firewall file is unchanged by the tunnel endpoint"
+fi
+
 step "HTTPS, certificate and TLS version"
 if curl -sS --cacert /tmp/agent.pem -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' "$API/v1/status" | grep -q '^401 0$'; then
 	ok "TLS verified against the shipped PEM (and no token means 401)"
@@ -442,6 +457,11 @@ if grep -q '0x2b' /tmp/fwmark2.txt; then
 	ok "the fwmark is back on a freshly created wg0"
 else
 	bad "wg0 came back without the fwmark ('$(cat /tmp/fwmark2.txt)')"
+fi
+if nft list chain inet autoproxy_rules tunnel_guard >/dev/null 2>&1; then
+	ok "tunnel_guard is back after a restart"
+else
+	bad "tunnel_guard was not restored after a restart"
 fi
 if nft list ruleset | grep -q '27015'; then
 	ok "rules restored after restart"

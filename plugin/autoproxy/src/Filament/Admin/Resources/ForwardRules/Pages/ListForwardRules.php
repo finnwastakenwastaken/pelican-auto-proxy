@@ -18,7 +18,10 @@ class ListForwardRules extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
-            CreateAction::make(),
+            // Pelican's CreateAction default hides the label and, with the icon
+            // button style on, renders a bare "+"; this page's one way in to a
+            // manual forward should say what it does.
+            CreateAction::make()->hiddenLabel(false)->button(),
         ];
     }
 

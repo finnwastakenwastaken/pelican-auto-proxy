@@ -4,11 +4,14 @@ namespace Arrowtje\AutoProxy\Filament\Admin\Pages;
 
 use App\Models\Node;
 use Arrowtje\AutoProxy\Exceptions\AutoProxyException;
+use Arrowtje\AutoProxy\Models\ClientUpdate;
 use Arrowtje\AutoProxy\Models\NodeSetting;
 use Arrowtje\AutoProxy\Services\AgentClient;
+use Arrowtje\AutoProxy\Services\LatestRelease;
 use Arrowtje\AutoProxy\Services\SyncService;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
 use Arrowtje\AutoProxy\Support\ClientInput;
+use Arrowtje\AutoProxy\Support\ClientVersion;
 use Arrowtje\AutoProxy\Support\VpsCode;
 use BackedEnum;
 use Filament\Notifications\Notification;
@@ -443,6 +446,7 @@ class Setup extends Page
             'peerOptions' => $this->peerOptions($peers),
             'nodes' => $nodes,
             'siteClients' => $this->siteClients($peers),
+            'statusUrl' => AutoProxyStatus::getUrl(),
             'anyProxied' => collect($nodes)->contains(fn (array $row) => $row['proxied']),
             'installCommand' => 'curl -fsSL ' . AutoProxySettings::releaseUrl() . '/install-vps.sh | sudo bash',
             'docs' => [
@@ -518,6 +522,7 @@ class Setup extends Page
                         : ['text' => 'Stale: last seen ' . $this->humanAge((int) $age) . ' ago', 'tone' => 'danger']),
                 'join_command' => $joinCode === null ? null : AutoProxySettings::joinCommand($joinCode),
                 'compose' => $joinCode === null ? null : $this->composeSnippet($joinCode),
+                'client' => $this->clientInfo($peer),
             ];
         }
 
@@ -574,7 +579,38 @@ class Setup extends Page
             'status' => $this->nodeStatus($setting, $mode, $watched, $peersById),
             'join_command' => $joinCode === null ? null : AutoProxySettings::joinCommand($joinCode),
             'compose' => $joinCode === null ? null : $this->composeSnippet($joinCode),
+            // Only a node with its own client has a client version to show; a
+            // site-mode node's client is listed under "other machines".
+            'client' => ($setting?->proxied && $mode === NodeSetting::MODE_REAL && isset($peersById[$peerId]))
+                ? $this->clientInfo($peersById[$peerId])
+                : null,
         ];
+    }
+
+    /** @var array{latest: string|null, allowed: array<string, bool>}|null */
+    protected ?array $clientContext = null;
+
+    /**
+     * The client version line for step 2. Updating is done on the Status page;
+     * this only says where things stand, so the admin sees it where they look.
+     *
+     * @param array<string, mixed> $peer
+     * @return array<string, mixed>
+     */
+    protected function clientInfo(array $peer): array
+    {
+        $this->clientContext ??= [
+            'latest' => LatestRelease::version(),
+            'allowed' => ClientUpdate::allowedMap(),
+        ];
+
+        return ClientVersion::describe(
+            $peer,
+            $this->clientContext['latest'],
+            $this->clientContext['allowed'][(string) ($peer['id'] ?? '')] ?? false,
+            AutoProxySettings::releaseUrl(),
+            time(),
+        );
     }
 
     /**

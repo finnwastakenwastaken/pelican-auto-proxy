@@ -85,9 +85,11 @@ jobs:
 
       # The next two steps run the same scripts a developer runs locally, so a release
       # cannot quietly produce a different layout than the one tested before tagging.
-      - name: package autoproxy-client.tar.gz
+      - name: package autoproxy-client.tar.gz (version stamped into the script)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          scripts/package-client.sh dist/autoproxy-client.tar.gz
+          scripts/package-client.sh dist/autoproxy-client.tar.gz "$VERSION"
           # The .sha256 sidecar exists for local AUTOPROXY_LOCAL_TARBALL testing;
           # the release publishes SHA256SUMS instead.
           rm -f dist/autoproxy-client.tar.gz.sha256

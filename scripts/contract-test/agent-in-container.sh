@@ -82,6 +82,60 @@ api -X POST -d '{"name":"joincode-site","mode":"site","lan_cidrs":["192.168.40.0
 python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["join_code"])' /tmp/jc-real.json > "$SHARED/join-real"
 python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["join_code"])' /tmp/jc-site.json > "$SHARED/join-site"
 
+# --- tunnel check-in: the client's own function against the real agent -----
+#
+# The real-mode peer's tunnel address is put on lo, so a connection from it to
+# the VPS's tunnel address reaches the agent exactly as one through WireGuard
+# would: local address 10.66.66.1, remote address the peer's own. Results go
+# to /shared/tunnel-checks for run.sh to print and count.
+REAL_TIP="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["peer"]["tunnel_ip"])' /tmp/jc-real.json)"
+REAL_ID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["peer"]["id"])' /tmp/jc-real.json)"
+ip addr add "$REAL_TIP/32" dev lo
+ip addr add 10.66.66.200/32 dev lo
+printf '%s\n' "$REAL_ID" > "$SHARED/checkin-peer"
+checks="$SHARED/tunnel-checks"
+: > "$checks"
+tc() { if [ "$2" = "$3" ]; then echo "PASS  $1" >> "$checks"; else echo "FAIL  $1 (got '$2', want '$3')" >> "$checks"; fi; }
+
+checkin_as() {
+	# $1 = source address; prints the HTTP status the agent answered
+	curl -sk -o /tmp/checkin-body -w '%{http_code}' --interface "$1" --max-time 5 \
+		-H 'Content-Type: application/json' -d '{"version":"0.3.0","flavour":"systemd"}' \
+		"https://10.66.66.1:7443/v1/tunnel/checkin"
+}
+
+# The client script's own check-in, loaded without running main().
+client_rc=0
+# shellcheck disable=SC2034  # read by the sourced client script
+client_out="$(
+	AUTOPROXY_RENDER_ONLY=1
+	# shellcheck source=/dev/null
+	. /client/autoproxy-client
+	VPS_TUNNEL_IP=10.66.66.1 CLIENT_ADDRESS="$REAL_TIP/32" API_PORT=7443
+	client_checkin
+)" || client_rc=$?
+tc "the real client's client_checkin() is answered 200 by the real agent" "$client_rc" "0"
+tc "the answer carries poll_s" "$(printf '%s' "$client_out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("poll_s"))' 2>/dev/null)" "120"
+tc "a tunnel address that is not a peer gets 401" "$(checkin_as 10.66.66.200)" "401"
+tc "the public address gets 401 without a token" "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 -d '{"version":"0.3.0"}' https://$IP:7443/v1/tunnel/checkin)" "401"
+tc "the tunnel path with the token is not an API route (404)" "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $TOKEN" -d '{}' https://$IP:7443/v1/tunnel/checkin)" "404"
+tc "the agent rendered tunnel_guard into its own table at start" "$(nft list chain inet autoproxy_rules tunnel_guard >/dev/null 2>&1 && echo yes || echo no)" "yes"
+tc "the base firewall table is untouched by the agent (no tunnel_guard there)" "$(nft list table inet autoproxy_base 2>/dev/null | grep -c tunnel_guard)" "0"
+tc "the join code carries api_port" "$(python3 -c 'import json,sys,base64;c=json.load(open(sys.argv[1]))["join_code"];c+="="*(-len(c)%4);print(json.loads(base64.urlsafe_b64decode(c))["api_port"])' /tmp/jc-real.json)" "7443"
+# The old-agent path: a client 0.3.0 talking to an agent without the route gets
+# 401, which client_checkin must turn into "3" (back off), not an error loop.
+old_rc=0
+# shellcheck disable=SC2034  # read by the sourced client script
+(
+	AUTOPROXY_RENDER_ONLY=1
+	# shellcheck source=/dev/null
+	. /client/autoproxy-client
+	VPS_TUNNEL_IP=10.66.66.1 CLIENT_ADDRESS="10.66.66.200/32" API_PORT=7443
+	client_checkin >/dev/null
+) || old_rc=$?
+tc "client_checkin() reads a 401 as 'agent too old' (3), not as a failure to retry" "$old_rc" "3"
+cat "$checks"
+
 touch "$SHARED/ready"
 echo ">> ready; API on https://$IP:7443"
 

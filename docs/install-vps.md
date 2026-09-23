@@ -76,7 +76,7 @@ so loudly and assumes 22; that is the moment to abort and re-run with `AUTOPROXY
 | File | `/etc/wireguard/wg0.conf` (mode 0600) | The tunnel interface's static config (address, private key, listen port). It deliberately holds **no peers**: the agent adds those live. |
 | File | `/etc/wireguard/autoproxy-server.key` / `.pub` | The VPS's WireGuard identity, generated once and never regenerated. |
 | File | `/etc/nftables.conf` | The base firewall (see below). The first time setup replaces a file that is not already ours, it keeps the old one at `/etc/nftables.conf.pre-autoproxy`. |
-| Directory | `/var/lib/autoproxy/` | `peers.json` (every node's public key, tunnel IP, mode) and `rules.json` (the last forwarding set applied), so a reboot restores both without waiting for the panel. |
+| Directory | `/var/lib/autoproxy/` | `peers.json` (every node's public key, tunnel IP, mode) and `rules.json` (the last forwarding set applied), so a reboot restores both without waiting for the panel; from 0.3.0 also `clients.json` (each client's reported version and any update the panel asked for). |
 | Systemd unit | `autoproxy-agent.service` | Runs `autoproxy-agent run`; `After=wg-quick@wg0.service`. |
 | Systemd unit | `wg-quick@wg0.service` | Brings the tunnel interface up at boot. Enabled by setup. |
 | nftables table | `inet autoproxy_base` | The base firewall from `/etc/nftables.conf`: an input chain with policy `drop` that allows loopback, established/related, ICMP, your sshd port, the WireGuard port and the API port. It has **no** forward chain on purpose — the agent's own table owns forwarding. |

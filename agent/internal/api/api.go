@@ -3,7 +3,14 @@
 // It listens on the public interface over TLS 1.3 with the self-signed
 // certificate generated at setup, and requires a bearer token on every route.
 // There is no UI and no unauthenticated health endpoint on purpose: nothing on
-// this listener should be reachable without the token.
+// this listener should be reachable from the internet without the token.
+//
+// The one exception is /v1/tunnel/, and it is not reachable from the
+// internet: it answers only a connection made TO the VPS's tunnel address FROM
+// a peer's own tunnel address. Only WireGuard can deliver such a packet
+// (cryptokey routing ties that source address to that peer's key), and the
+// agent's own nftables table drops anything addressed to the tunnel address
+// that did not arrive on the tunnel interface. See tunnel.go.
 //
 // The Pelican panel may be anywhere -- a box on the admin's LAN, a VM at
 // another provider -- so the listener cannot be restricted to the tunnel. What
@@ -22,12 +29,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/clients"
 	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/nft"
 	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/peers"
 	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/rules"
@@ -58,6 +67,10 @@ type Config struct {
 	RulesFile   string
 	EnvFile     string // agent.env; rewritten by POST /v1/token/rotate
 	Version     string
+	// TunnelIP is the VPS's own address on the tunnel (10.66.66.1 by
+	// default). Tunnel check-ins must be addressed to it; the zero value
+	// switches the tunnel endpoint and the nftables guard off.
+	TunnelIP netip.Addr
 }
 
 // Server owns the applied rule set. Every apply is serialised by mu, so two
@@ -69,6 +82,7 @@ type Server struct {
 	wg      wg.Reader
 	wgm     wg.Manager
 	peers   *peers.Manager
+	clients *clients.Registry
 	log     *slog.Logger
 	start   time.Time
 	lock    *lockout
@@ -90,6 +104,7 @@ func New(cfg Config, store state.Store, applier nft.Applier, wgr wg.Reader, wgm 
 		wg:      wgr,
 		wgm:     wgm,
 		peers:   pm,
+		clients: clients.NewRegistry(clients.Store{Dir: store.Dir}),
 		log:     log,
 		start:   time.Now(),
 		lock:    newLockout(nil),
@@ -132,6 +147,19 @@ func (s *Server) Restore() {
 		s.log.Error("peer restore failed", "error", err)
 	}
 
+	if err := s.clients.Load(); err != nil {
+		// Only reported versions and pending update requests live there;
+		// starting without them is better than not starting.
+		s.log.Warn("client state could not be read; starting without reported versions", "error", err)
+	}
+	live := map[string]bool{}
+	for _, p := range s.peers.List() {
+		live[p.ID] = true
+	}
+	if err := s.clients.Prune(live); err != nil {
+		s.log.Warn("could not prune client state", "error", err)
+	}
+
 	snap, err := s.store.Load()
 	if err != nil {
 		s.setError("load state: " + err.Error())
@@ -139,6 +167,16 @@ func (s *Server) Restore() {
 		return
 	}
 	if snap == nil {
+		// Still render the (empty) table: it carries the tunnel guard, which
+		// must not wait for the panel's first push.
+		s.mu.Lock()
+		_, err := s.applyLocked([]rules.Rule{})
+		s.mu.Unlock()
+		if err != nil {
+			s.setError("restore: " + err.Error())
+			s.log.Error("could not apply the empty rule set", "error", err)
+			return
+		}
 		s.log.Info("no stored rules, starting empty")
 		return
 	}
@@ -197,7 +235,7 @@ func (s *Server) applyLocked(rs []rules.Rule) (nft.Counts, error) {
 	if len(bad) > 0 {
 		return nft.Counts{}, fmt.Errorf("rule %q: %s", bad[0].ID, bad[0].Reason)
 	}
-	text := nft.Render(resolved, s.cfg.PublicIface, s.cfg.WGIface, s.directTargets())
+	text := nft.Render(resolved, s.cfg.PublicIface, s.cfg.WGIface, s.directTargets(), s.guardAddr())
 	if err := s.applier.Apply(s.cfg.RulesFile, text); err != nil {
 		return nft.Counts{}, err
 	}
@@ -206,6 +244,15 @@ func (s *Server) applyLocked(rs []rules.Rule) (nft.Counts, error) {
 	s.appliedAt = time.Now().UTC()
 	s.lastError = ""
 	return s.counts, nil
+}
+
+// guardAddr is the tunnel address the nftables guard protects, or "" when the
+// tunnel endpoint is off.
+func (s *Server) guardAddr() string {
+	if !s.cfg.TunnelIP.IsValid() {
+		return ""
+	}
+	return s.cfg.TunnelIP.String()
 }
 
 // reapply re-renders the current rule set against the current peer list,
@@ -254,16 +301,62 @@ type statusResponse struct {
 // peerResponse is one peer as the plugin sees it: the stored record plus the
 // live counters from "wg show".
 type peerResponse struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	PublicKey    string    `json:"public_key"`
-	TunnelIP     string    `json:"tunnel_ip"`
-	Mode         string    `json:"mode"`
-	LANCIDRs     []string  `json:"lan_cidrs"`
-	HandshakeAge *int64    `json:"handshake_age_s"`
-	RX           int64     `json:"rx"`
-	TX           int64     `json:"tx"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	PublicKey    string     `json:"public_key"`
+	TunnelIP     string     `json:"tunnel_ip"`
+	Mode         string     `json:"mode"`
+	LANCIDRs     []string   `json:"lan_cidrs"`
+	HandshakeAge *int64     `json:"handshake_age_s"`
+	RX           int64      `json:"rx"`
+	TX           int64      `json:"tx"`
+	CreatedAt    time.Time  `json:"created_at"`
+	Client       clientView `json:"client"`
+}
+
+// clientView is what the peer's tunnel client last reported and what the
+// panel asked it to run. Every key is always present; null means "never
+// reported" or "nothing requested". A client older than 0.3.0 never reports,
+// so its version stays null for good.
+type clientView struct {
+	Version        *string         `json:"version"`
+	Flavour        *string         `json:"flavour"`
+	RemoteUpdates  *bool           `json:"remote_updates"`
+	ReportedAt     *time.Time      `json:"reported_at"`
+	DesiredVersion *string         `json:"desired_version"`
+	RequestID      *string         `json:"request_id"`
+	RequestedAt    *time.Time      `json:"requested_at"`
+	Update         *clients.Update `json:"update"`
+}
+
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func viewOf(rec clients.Record) clientView {
+	return clientView{
+		Version:        strPtr(rec.Version),
+		Flavour:        strPtr(rec.Flavour),
+		RemoteUpdates:  rec.RemoteUpdates,
+		ReportedAt:     rec.ReportedAt,
+		DesiredVersion: strPtr(rec.DesiredVersion),
+		RequestID:      strPtr(rec.RequestID),
+		RequestedAt:    rec.RequestedAt,
+		Update:         rec.Update,
+	}
+}
+
+type setClientRequest struct {
+	// DesiredVersion is a release number ("0.3.1", a leading "v" is
+	// accepted). null or "" withdraws a request.
+	DesiredVersion *string `json:"desired_version"`
+}
+
+type setClientResponse struct {
+	Client clientView `json:"client"`
 }
 
 type peersResponse struct {
@@ -328,6 +421,7 @@ func (s *Server) peerResponses() []peerResponse {
 		r := peerResponse{
 			ID: p.ID, Name: p.Name, PublicKey: p.PublicKey, TunnelIP: p.TunnelIP,
 			Mode: p.Mode, LANCIDRs: p.LANCIDRs, CreatedAt: p.CreatedAt,
+			Client: viewOf(s.clients.Get(p.ID)),
 		}
 		if r.LANCIDRs == nil {
 			r.LANCIDRs = []string{}
@@ -420,6 +514,9 @@ func (s *Server) handleDeletePeer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 		return
 	}
+	if err := s.clients.Forget(p.ID); err != nil {
+		s.log.Warn("could not drop the deleted peer's client state", "id", p.ID, "error", err)
+	}
 	// Close the forwards that pointed at this peer straight away rather than
 	// leaving public ports open on to an address nothing answers on.
 	s.reapply("peer " + p.ID + " deleted")
@@ -454,6 +551,43 @@ func (s *Server) handleRotatePeer(w http.ResponseWriter, r *http.Request) {
 		resp.Peer.LANCIDRs = []string{}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSetClient records the client version the panel wants a peer to run.
+// It only stores a version string: the client itself decides whether it may
+// act on it (remote updates switched on, newer than what it runs, an official
+// release whose checksum verifies). See docs/security.md.
+func (s *Server) handleSetClient(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.peers.Get(id); !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "no peer with id " + id})
+		return
+	}
+	var req setClientRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	want := ""
+	if req.DesiredVersion != nil {
+		want = *req.DesiredVersion
+	}
+	rec, err := s.clients.SetDesired(id, want)
+	var ve clients.ValidationError
+	if errors.As(err, &ve) {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: ve.Reason})
+		return
+	}
+	if err != nil {
+		s.log.Error("could not save the client update request", "id", id, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "could not save the request: " + err.Error()})
+		return
+	}
+	if rec.DesiredVersion == "" {
+		s.log.Info("client update request withdrawn", "peer", id)
+	} else {
+		s.log.Info("client update requested", "peer", id, "version", rec.DesiredVersion, "request", rec.RequestID)
+	}
+	writeJSON(w, http.StatusOK, setClientResponse{Client: viewOf(rec)})
 }
 
 // writePeerError maps a peers error to a status code: a caller mistake is 422,
@@ -662,9 +796,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/peers", s.handleCreatePeer)
 	mux.HandleFunc("DELETE /v1/peers/{id}", s.handleDeletePeer)
 	mux.HandleFunc("POST /v1/peers/{id}/rotate", s.handleRotatePeer)
+	mux.HandleFunc("PUT /v1/peers/{id}/client", s.handleSetClient)
 	mux.HandleFunc("POST /v1/token/rotate", s.handleTokenRotate)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not found"})
 	})
-	return s.logging(s.auth(mux))
+	authed := s.logging(s.auth(mux))
+	tunnel := s.tunnelHandler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only a request that provably came through the tunnel from a known
+		// peer skips the token. Anything else under /v1/tunnel/ -- including
+		// a public request that merely uses the path -- takes the normal
+		// route: 401 without the token, 404 with it.
+		if strings.HasPrefix(r.URL.Path, TunnelPrefix) {
+			if peerID, ok := s.tunnelPeer(r); ok {
+				tunnel.ServeHTTP(w, withPeer(r, peerID))
+				return
+			}
+		}
+		authed.ServeHTTP(w, r)
+	})
 }

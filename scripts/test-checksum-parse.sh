@@ -46,6 +46,20 @@ verify_with() {
 	echo "$rc"
 }
 
+# The same, for "autoproxy-client update", which carries its own copy of the
+# function (it cannot source the installer on a node that no longer has it).
+verify_with_client() {
+	local asset="$1" dir="$2" rc=0
+	(
+		set +e
+		# shellcheck disable=SC1091  # the client script, loaded without running main()
+		AUTOPROXY_RENDER_ONLY=1 source "$root/client/autoproxy-client" >/dev/null 2>&1
+		verify_against_sha256sums "$asset" "$dir" >/dev/null 2>&1
+		exit $?
+	) || rc=$?
+	echo "$rc"
+}
+
 expect() {
 	local what="$1" got="$2" want="$3"
 	if [ "$got" = "$want" ]; then
@@ -91,6 +105,8 @@ expect "install-vps.sh accepts autoproxy-agent_linux_amd64" \
 	"$(verify_with "$root/installers/install-vps.sh" autoproxy-agent_linux_amd64 "$fixture")" 0
 expect "install-client.sh accepts autoproxy-client.tar.gz" \
 	"$(verify_with "$root/installers/install-client.sh" autoproxy-client.tar.gz "$fixture")" 0
+expect "autoproxy-client update accepts autoproxy-client.tar.gz" \
+	"$(verify_with_client autoproxy-client.tar.gz "$fixture")" 0
 
 echo
 echo ">> 2. corrupted artefact: both installers must refuse (this is the gate failing on purpose)"
@@ -102,6 +118,8 @@ expect "install-vps.sh refuses a tampered binary" \
 	"$(verify_with "$root/installers/install-vps.sh" autoproxy-agent_linux_amd64 "$broken")" 1
 expect "install-client.sh refuses a tampered tarball" \
 	"$(verify_with "$root/installers/install-client.sh" autoproxy-client.tar.gz "$broken")" 1
+expect "autoproxy-client update refuses a tampered tarball" \
+	"$(verify_with_client autoproxy-client.tar.gz "$broken")" 1
 rm -rf "$broken"
 
 echo
@@ -113,6 +131,8 @@ expect "install-vps.sh refuses dist/-prefixed entries" \
 	"$(verify_with "$root/installers/install-vps.sh" autoproxy-agent_linux_amd64 "$prefixed")" 2
 expect "install-client.sh refuses dist/-prefixed entries" \
 	"$(verify_with "$root/installers/install-client.sh" autoproxy-client.tar.gz "$prefixed")" 2
+expect "autoproxy-client update refuses dist/-prefixed entries" \
+	"$(verify_with_client autoproxy-client.tar.gz "$prefixed")" 2
 rm -rf "$prefixed"
 
 echo
@@ -126,7 +146,28 @@ expect "install-vps.sh refuses when its asset is absent from SHA256SUMS" \
 	"$(verify_with "$root/installers/install-vps.sh" autoproxy-agent_linux_amd64 "$missing")" 2
 expect "install-client.sh refuses when its asset is absent from SHA256SUMS" \
 	"$(verify_with "$root/installers/install-client.sh" autoproxy-client.tar.gz "$missing")" 2
+expect "autoproxy-client update refuses when its asset is absent from SHA256SUMS" \
+	"$(verify_with_client autoproxy-client.tar.gz "$missing")" 2
 rm -rf "$missing"
+
+echo
+echo ">> 5. the installer and the client's update carry the same verification, byte for byte"
+fn_installer="$(
+	# shellcheck disable=SC1091
+	AUTOPROXY_INSTALLER_SOURCE_ONLY=1 source "$root/installers/install-client.sh" >/dev/null 2>&1
+	declare -f verify_against_sha256sums
+)"
+fn_client="$(
+	# shellcheck disable=SC1091
+	AUTOPROXY_RENDER_ONLY=1 source "$root/client/autoproxy-client" >/dev/null 2>&1
+	declare -f verify_against_sha256sums
+)"
+if [ -n "$fn_client" ] && [ "$fn_installer" = "$fn_client" ]; then
+	ok "verify_against_sha256sums is identical in install-client.sh and autoproxy-client"
+else
+	bad "verify_against_sha256sums differs between install-client.sh and autoproxy-client"
+	diff <(printf '%s\n' "$fn_installer") <(printf '%s\n' "$fn_client") >&2 || true
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

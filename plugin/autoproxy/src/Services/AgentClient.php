@@ -3,6 +3,7 @@
 namespace Arrowtje\AutoProxy\Services;
 
 use Arrowtje\AutoProxy\Exceptions\AutoProxyException;
+use Arrowtje\AutoProxy\Models\ClientUpdate;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
@@ -121,6 +122,14 @@ class AgentClient
             fn (PendingRequest $http, string $url) => $http->delete($url . '/v1/peers/' . rawurlencode($id)),
             $this->pushTimeout(),
         );
+
+        // The peer is gone, so is its "allow remote updates" switch. Here rather
+        // than at each caller: the Setup page and the CLI both delete peers.
+        try {
+            ClientUpdate::forget($id);
+        } catch (\Throwable) {
+            // No database (the contract test harness) or not migrated yet.
+        }
     }
 
     /**
@@ -143,6 +152,29 @@ class AgentClient
         }
 
         return $joinCode;
+    }
+
+    /**
+     * Ask a tunnel client to install another client release, or withdraw that
+     * request with null. The agent only stores the number; the client decides
+     * whether it may act on it (remote updates on there too, newer than what it
+     * runs, an official release whose checksum verifies). Needs agent 0.3.0.
+     *
+     * @return array<string, mixed> the peer's "client" object as the agent now holds it
+     *
+     * @throws AutoProxyException
+     */
+    public function setClientVersion(string $peerId, ?string $version): array
+    {
+        $body = $this->decode($this->send(
+            fn (PendingRequest $http, string $url) => $http->put(
+                $url . '/v1/peers/' . rawurlencode($peerId) . '/client',
+                ['desired_version' => $version],
+            ),
+            $this->pushTimeout(),
+        ));
+
+        return is_array($body['client'] ?? null) ? $body['client'] : [];
     }
 
     /**
@@ -338,6 +370,10 @@ class AgentClient
             }
 
             return 'The VPS refused the request: ' . $this->body($response);
+        }
+
+        if ($status === 404 && str_ends_with((string) parse_url((string) $response->effectiveUri(), PHP_URL_PATH), '/client')) {
+            return 'The VPS agent does not know client updates (HTTP 404). Update the agent on the VPS to 0.3.0 or newer first.';
         }
 
         if ($status >= 500) {

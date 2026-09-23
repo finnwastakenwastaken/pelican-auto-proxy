@@ -21,6 +21,11 @@ RUN apk add --no-cache \
       ca-certificates \
     && rm -rf /var/cache/apk/*
 
+# Tells the client it runs as the container flavour: it reports "docker" to the
+# agent, and "autoproxy-client update" refuses (an image cannot replace itself;
+# pull a new image instead).
+ENV AUTOPROXY_FLAVOUR=docker
+
 COPY autoproxy-client /usr/local/bin/autoproxy-client
 RUN chmod 0755 /usr/local/bin/autoproxy-client
 

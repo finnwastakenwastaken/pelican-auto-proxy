@@ -34,8 +34,8 @@ sudo autoproxy-client uninstall
 
 Removes the `autoproxy-client` systemd unit, `/etc/autoproxy/client.json`, `/etc/wireguard/autoproxy0.conf`,
 `/etc/sysctl.d/90-autoproxy.conf`, `/usr/local/bin/autoproxy-client`, the `autoproxy0` interface, the `inet
-autoproxy_client` nftables table, its `ip rule` and routing table, and the `DOCKER-USER` accept rules if it added
-them — same "list first, ask unless `--yes`" behaviour as the agent. (`autoproxy0` is the node host's tunnel
+autoproxy_client` nftables table, its `ip rule` and routing table, the `DOCKER-USER` accept rules if it added
+them, and `/etc/autoproxy/remote-updates` and `/run/autoproxy-client` if present — same "list first, ask unless `--yes`" behaviour as the agent. (`autoproxy0` is the node host's tunnel
 interface; the VPS's is `wg0`.) The live `ip_forward` and `rp_filter` kernel values are left as they are until the
 next reboot; only the file that made them persistent is removed.
 
