@@ -111,6 +111,13 @@ tunnel then carries nothing until the next handshake: that is what used to make 
 players around 15-30 seconds of dead traffic. If anything really has changed, the full sync runs and
 the log tells you the tunnel is being rekeyed, so a new endpoint or keepalive still takes effect.
 
+A restart keeps the tunnel's local UDP port, so it cannot help when the network between this machine
+and the VPS drops that one flow. That case is handled separately: after 3 minutes without a handshake
+(WireGuard's own limit for a session), `run` moves the tunnel to a new random local port and
+re-resolves the VPS endpoint, then does it again every 3 minutes while the tunnel stays down. This
+changes no key and no config, so it cannot disturb a working tunnel; the VPS follows the new port by
+itself. After 10 minutes `run` still exits so the service manager restarts it.
+
 ## Docker / Compose flavour
 
 ```

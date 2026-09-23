@@ -27,6 +27,9 @@ readonly FWMARK="0x2a"
 readonly RT_TABLE="200"
 readonly RT_PRIORITY="100"
 readonly STALE_SECONDS=600
+# WireGuard's Reject-After-Time: past this, the current session is dead
+# anyway, so moving to a new local port cannot disturb a working tunnel.
+readonly REPATH_SECONDS=180
 readonly LOG_INTERVAL=30
 readonly CONF_DIR="/etc/autoproxy"
 readonly CONF_FILE="${CONF_DIR}/client.json"
@@ -374,6 +377,16 @@ EOF
     echo "}"
 }
 
+# True when the run loop should move the tunnel to a new local port now.
+# $1 = seconds without a handshake; $2 = seconds since the last move during
+# this outage, or -1 if there has been none. One move per REPATH_SECONDS, so
+# a path that stays dead is retried from a fresh port every few minutes.
+repath_due() {
+    local age="$1" since_last="$2"
+    (( age >= REPATH_SECONDS )) || return 1
+    (( since_last < 0 || since_last >= REPATH_SECONDS ))
+}
+
 # --- config read/write -------------------------------------------------
 
 write_config_from_code() {
@@ -560,7 +573,13 @@ cmd_up() {
             fi
             exit 1
         fi
-        wg setconf "$IFACE" "$WG_CONF_FILE"
+        # Stripped, like the syncconf above: the file carries wg-quick keys
+        # (Address, Table) that plain "wg setconf" rejects, which used to make
+        # every first start after boot fail and succeed only on the restart.
+        if ! wg setconf "$IFACE" <(wg-quick strip "$IFACE"); then
+            err "wg setconf failed on a new ${IFACE}; check 'wg-quick strip ${IFACE}' output"
+            exit 1
+        fi
         ip -4 addr add "$CLIENT_ADDRESS" dev "$IFACE"
         ip link set "$IFACE" up
         log "${IFACE} is up (${CLIENT_ADDRESS})"
@@ -614,6 +633,27 @@ cmd_down() {
     teardown_network
 }
 
+# Moves the tunnel to a new random local UDP port and re-resolves the VPS
+# endpoint, without touching the key, so no rekey and no config change.
+#
+# A restart alone cannot get out of a stuck path: it keeps the interface, so
+# it keeps the local port, and the same address/port pair goes out again. Seen
+# on a live node: somewhere between the node and the VPS, one UDP flow was
+# dropped in one direction for 22 hours while every other flow between the same
+# two machines worked; 237 restarts changed nothing, one new local port fixed
+# it within a minute. The VPS follows the new port on its own (WireGuard
+# roaming), because the first packet from it is authenticated.
+repath_tunnel() {
+    local age="$1" old new
+    old="$(wg show "$IFACE" listen-port 2>/dev/null || echo '?')"
+    if ! wg set "$IFACE" listen-port 0 peer "$VPS_WG_PUBKEY" endpoint "$ENDPOINT"; then
+        warn "no handshake for ${age}s and moving to a new local port failed; will retry"
+        return 0
+    fi
+    new="$(wg show "$IFACE" listen-port 2>/dev/null || echo '?')"
+    log "no handshake for ${age}s: moved the tunnel to a new local port (${old} -> ${new}) in case the network path is stuck on the old one"
+}
+
 # --- run (systemd ExecStart / Docker entrypoint) ---------------------------
 
 cmd_run() {
@@ -634,7 +674,7 @@ cmd_run() {
 
     cmd_up
 
-    local start_ts now hs_raw age transfer
+    local start_ts now hs_raw age transfer repath_ts=0
     start_ts=$(date +%s)
     while true; do
         sleep "$LOG_INTERVAL" &
@@ -648,6 +688,13 @@ cmd_run() {
         else
             age=$(( now - hs_raw ))
             log "handshake age ${age}s"
+        fi
+
+        if (( age < REPATH_SECONDS )); then
+            repath_ts=0
+        elif repath_due "$age" "$(( repath_ts > 0 ? now - repath_ts : -1 ))"; then
+            repath_tunnel "$age"
+            repath_ts=$now
         fi
 
         if (( age >= STALE_SECONDS )); then

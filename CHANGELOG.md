@@ -4,6 +4,21 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-23
+
+The plugin is unchanged; the version moves with the tag. Update the tunnel client on each node host as described in
+[docs/updating.md](docs/updating.md).
+
+- Client: a tunnel stuck on one network path now recovers by itself. After 3 minutes without a handshake the client
+  moves the tunnel to a new local UDP port and re-resolves the VPS endpoint, and repeats that every 3 minutes while
+  it stays down. Seen on a live node: the network dropped the one UDP flow from the node's port to the VPS for 22
+  hours while every other connection between the two machines worked; 237 service restarts kept the same port and
+  changed nothing, one new port fixed it within a minute. No key or config changes, so a working tunnel is never
+  touched. New container test `client/tests/test-repath.sh` (in CI) reproduces the stuck port and fails without
+  the fix.
+- Client: the first start on a machine where the tunnel interface does not exist yet (a fresh install, or every
+  boot) failed with `Line unrecognized: Address=...` and only worked on systemd's automatic restart 5 seconds
+  later. The config is now stripped of wg-quick-only keys before `wg setconf`, as the restart path already did.
 - `installers/setup-node.sh` has now been run end to end on a throwaway Debian 13 machine from the 0.2.6 release asset: Docker installed, Wings installed and started with a panel configuration, a real Let's Encrypt certificate issued through the Cloudflare DNS method and served by Wings with strict verification, renewal dry run passed, second run changed nothing.
 
 ## [0.2.6] - 2026-09-22

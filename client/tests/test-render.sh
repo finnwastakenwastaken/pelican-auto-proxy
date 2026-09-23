@@ -170,6 +170,20 @@ check_eq "render_client_json: mode round-trips" "$(json_get "$client_json" mode)
 check_eq "render_client_json: host_ip round-trips" "$(json_get "$client_json" host_ip)" "192.0.2.50"
 check_eq "render_client_json: lan_cidrs round-trips" "$(json_get "$client_json" lan_cidrs)" "192.0.2.0/24,198.51.100.0/24"
 
+# --- repath_due: when the run loop moves the tunnel to a new local port ----
+
+repath_case() {
+    local name="$1" age="$2" since_last="$3" want="$4" got=no
+    repath_due "$age" "$since_last" && got=yes
+    check_eq "repath_due: $name" "$got" "$want"
+}
+repath_case "healthy tunnel between rekeys (150s) is left alone" 150 -1 no
+repath_case "just under the limit is left alone" 179 -1 no
+repath_case "first move once the session is dead (180s)" 180 -1 yes
+repath_case "no second move 30s after the first" 210 30 no
+repath_case "second move a full interval after the first" 360 180 yes
+repath_case "long outage keeps moving" 900 200 yes
+
 echo
 if [[ $fail -ne 0 ]]; then
     echo "test-render: FAILED"

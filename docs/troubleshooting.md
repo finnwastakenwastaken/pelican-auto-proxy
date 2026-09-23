@@ -28,6 +28,17 @@ sudo wg show wg0
 port (a simple `nc -u` round trip, or the VPS's own logs for incoming attempts). If the VPS's public IP changed,
 generate a fresh join code from the plugin rather than editing the old config by hand.
 
+**If the handshake worked before and then stopped,** while every other connection between the node host and the
+VPS still works, the network between them may be dropping that one UDP flow (this node's port to the VPS's
+WireGuard port). A service restart does not help, because it keeps the same local port. Since 0.2.7 the client
+moves to a new local port by itself after 3 minutes without a handshake, and again every 3 minutes while it stays
+down; the log says `moved the tunnel to a new local port (old -> new)`. On an older client, do it by hand (it does
+not rekey and does not change the config):
+
+```bash
+sudo wg set autoproxy0 listen-port 0
+```
+
 **If the VPS shows bytes sent and received but still no handshake,** the two sides are talking past each other
 rather than not reaching each other. On the VPS, check that the tunnel's own packets are not being routed back
 into the tunnel:

@@ -49,6 +49,10 @@ jobs:
             echo "checking $f"
             sudo nft -c -f "$f"
           done
+      # The client's render and decode functions against those golden files,
+      # plus the repath timing rule. Pure bash, no root.
+      - name: client/tests/test-render.sh
+        run: bash client/tests/test-render.sh
 
   shell:
     name: shellcheck + bash -n
@@ -134,6 +138,21 @@ jobs:
       # (they use AUTOPROXY_LOCAL_*). It found the "13 (trixie)" download URL.
       - name: client/tests/test-install-resolve.sh
         run: client/tests/test-install-resolve.sh
+
+  client-repath:
+    name: client recovers from a path stuck on one local port
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # A container with --network none and NET_ADMIN: a stand-in VPS interface
+      # and autoproxy0 over loopback, with an nft rule dropping only the
+      # client's current port. The handshake must fail first and succeed after
+      # repath_tunnel. Seen live: one UDP flow dropped for 22 h, restarts kept
+      # the same port and never recovered.
+      - name: load the wireguard module
+        run: sudo modprobe wireguard
+      - name: client/tests/test-repath.sh
+        run: client/tests/test-repath.sh
 
   actionlint:
     name: actionlint
