@@ -69,6 +69,13 @@ readonly UPDATE_UNIT="autoproxy-client-update"
 # VPS's tunnel address, and hears back which version the panel asked for.
 readonly DEFAULT_API_PORT=7443
 readonly CHECKIN_SECONDS=120
+# A check-in that times out while the handshake still looks fresh is the other
+# face of a stuck path: seen live, the network dropped almost every packet of
+# one flow towards the VPS, but the odd one got through, so the handshake kept
+# renewing and the handshake-age repath never fired. After this many timeouts in
+# a row (retried every CHECKIN_RETRY_SECONDS), the tunnel moves port anyway.
+readonly CHECKIN_RETRY_SECONDS=60
+readonly CHECKIN_REPATH_AFTER=2
 # An agent older than 0.3.0 answers a check-in with 401 (it has no such
 # route and wants its token). Asking again every two minutes would put a
 # warning in that agent's journal every two minutes, so the client backs off.
@@ -94,6 +101,7 @@ HOST_IP=""
 API_PORT=""
 NEXT_CHECKIN=0
 CHECKIN_STATE=""
+CHECKIN_TIMEOUTS=0
 US_STATE=""
 US_VERSION=""
 US_ERROR=""
@@ -432,6 +440,12 @@ repath_due() {
     (( since_last < 0 || since_last >= REPATH_SECONDS ))
 }
 
+# True when this many check-ins in a row have timed out: the tunnel carries
+# (almost) nothing towards the VPS even though the handshake looks fresh.
+checkin_repath_due() {
+    (( $1 >= CHECKIN_REPATH_AFTER ))
+}
+
 # --- config read/write -------------------------------------------------
 
 write_config_from_code() {
@@ -697,14 +711,14 @@ cmd_down() {
 # it within a minute. The VPS follows the new port on its own (WireGuard
 # roaming), because the first packet from it is authenticated.
 repath_tunnel() {
-    local age="$1" old new
+    local reason="$1" old new
     old="$(wg show "$IFACE" listen-port 2>/dev/null || echo '?')"
     if ! wg set "$IFACE" listen-port 0 peer "$VPS_WG_PUBKEY" endpoint "$ENDPOINT"; then
-        warn "no handshake for ${age}s and moving to a new local port failed; will retry"
+        warn "${reason}, and moving to a new local port failed; will retry"
         return 0
     fi
     new="$(wg show "$IFACE" listen-port 2>/dev/null || echo '?')"
-    log "no handshake for ${age}s: moved the tunnel to a new local port (${old} -> ${new}) in case the network path is stuck on the old one"
+    log "${reason}: moved the tunnel to a new local port (${old} -> ${new}) in case the network path is stuck on the old one"
 }
 
 # --- version, check-in and update -------------------------------------------
@@ -823,7 +837,13 @@ client_checkin() {
         "$US_STATE" "$US_VERSION" "$US_ERROR" "$US_RID")"
     resp="$(curl -sS -k --interface "${CLIENT_ADDRESS%/*}" --connect-timeout 5 --max-time 10 \
         -H 'Content-Type: application/json' --data "$body" -w '\n%{http_code}' \
-        "https://${VPS_TUNNEL_IP}:${API_PORT:-$DEFAULT_API_PORT}/v1/tunnel/checkin" 2>/dev/null)" || return 1
+        "https://${VPS_TUNNEL_IP}:${API_PORT:-$DEFAULT_API_PORT}/v1/tunnel/checkin" 2>/dev/null)" || {
+        # 28 is curl's timeout: nothing came back through the tunnel. Anything
+        # else (refused, TLS error) means packets did come back, so the path
+        # works and only the agent is the problem.
+        (( $? == 28 )) && return 4
+        return 1
+    }
     code="${resp##*$'\n'}"
     resp="${resp%$'\n'*}"
     case "$code" in
@@ -909,6 +929,7 @@ checkin_tick() {
     resp="$(client_checkin)" || rc=$?
     case "$rc" in
         0)
+            CHECKIN_TIMEOUTS=0
             case "$CHECKIN_STATE" in
                 ok) : ;;
                 "") log "reported version ${AUTOPROXY_VERSION} to the VPS agent" ;;
@@ -923,13 +944,27 @@ checkin_tick() {
             maybe_remote_update "$desired" "$rid"
             ;;
         3)
+            CHECKIN_TIMEOUTS=0
             if [[ "$CHECKIN_STATE" != "old-agent" ]]; then
                 log "the VPS agent does not take version reports (it is older than 0.3.0, or did not recognise this machine's tunnel address); the panel will show no version for this node. Trying again in $(( OLD_AGENT_BACKOFF_SECONDS / 3600 )) hours, or at once after 'systemctl restart autoproxy-client'."
             fi
             CHECKIN_STATE="old-agent"
             NEXT_CHECKIN=$(( now + OLD_AGENT_BACKOFF_SECONDS ))
             ;;
+        4)
+            CHECKIN_TIMEOUTS=$(( CHECKIN_TIMEOUTS + 1 ))
+            if [[ "$CHECKIN_STATE" != "failing" ]]; then
+                warn "reporting to the VPS agent over the tunnel timed out; retrying every ${CHECKIN_RETRY_SECONDS}s without logging each attempt"
+            fi
+            CHECKIN_STATE="failing"
+            NEXT_CHECKIN=$(( now + CHECKIN_RETRY_SECONDS ))
+            if checkin_repath_due "$CHECKIN_TIMEOUTS"; then
+                repath_tunnel "${CHECKIN_TIMEOUTS} reports to the VPS in a row timed out although the handshake looks fresh"
+                CHECKIN_TIMEOUTS=0
+            fi
+            ;;
         *)
+            CHECKIN_TIMEOUTS=0
             if [[ "$CHECKIN_STATE" != "failing" ]]; then
                 warn "could not report to the VPS agent at https://${VPS_TUNNEL_IP}:${API_PORT:-$DEFAULT_API_PORT} over the tunnel; retrying every ${CHECKIN_SECONDS}s without logging each attempt"
             fi
@@ -1188,7 +1223,7 @@ cmd_run() {
         if (( age < REPATH_SECONDS )); then
             repath_ts=0
         elif repath_due "$age" "$(( repath_ts > 0 ? now - repath_ts : -1 ))"; then
-            repath_tunnel "$age"
+            repath_tunnel "no handshake for ${age}s"
             repath_ts=$now
         fi
 

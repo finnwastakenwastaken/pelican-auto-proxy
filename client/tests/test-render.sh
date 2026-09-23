@@ -184,6 +184,17 @@ repath_case "no second move 30s after the first" 210 30 no
 repath_case "second move a full interval after the first" 360 180 yes
 repath_case "long outage keeps moving" 900 200 yes
 
+# --- checkin_repath_due: timed-out check-ins with a fresh handshake ---------
+
+checkin_case() {
+    local name="$1" timeouts="$2" want="$3" got=no
+    checkin_repath_due "$timeouts" && got=yes
+    check_eq "checkin_repath_due: $name" "$got" "$want"
+}
+checkin_case "one timeout can be a blip" 1 no
+checkin_case "two in a row moves the tunnel" 2 yes
+checkin_case "no timeouts" 0 no
+
 # --- versions: the client's twin of agent/internal/clients.Compare ---------
 
 vcmp_case() {

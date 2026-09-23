@@ -32,7 +32,9 @@ generate a fresh join code from the plugin rather than editing the old config by
 VPS still works, the network between them may be dropping that one UDP flow (this node's port to the VPS's
 WireGuard port). A service restart does not help, because it keeps the same local port. Since 0.2.7 the client
 moves to a new local port by itself after 3 minutes without a handshake, and again every 3 minutes while it stays
-down; the log says `moved the tunnel to a new local port (old -> new)`. On an older client, do it by hand (it does
+down; the log says `moved the tunnel to a new local port (old -> new)`. Since 0.3.1 it also moves when the path
+drops nearly everything but the odd handshake, so the handshake looks fresh while no traffic arrives: two version
+reports to the VPS in a row that time out trigger the same move (needs a 0.3.0 or later VPS agent). On an older client, do it by hand (it does
 not rekey and does not change the config):
 
 ```bash

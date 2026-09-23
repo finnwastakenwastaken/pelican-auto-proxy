@@ -59,7 +59,7 @@ sleep 8
 echo "ok:   no handshake while stuck on local port $stuck"
 
 VPS_WG_PUBKEY="$vp"; ENDPOINT="127.0.0.1:51820"
-if [[ "$BREAK" != 1 ]]; then repath_tunnel 190; fi
+if [[ "$BREAK" != 1 ]]; then repath_tunnel "no handshake for 190s"; fi
 
 for _ in $(seq 20); do [[ "$(hs_of "$IFACE")" != 0 ]] && break; sleep 1; done
 [[ "$(hs_of "$IFACE")" != 0 ]] || fail "no handshake after moving to a new local port"

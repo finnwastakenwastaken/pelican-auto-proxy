@@ -153,6 +153,13 @@ jobs:
         run: sudo modprobe wireguard
       - name: client/tests/test-repath.sh
         run: client/tests/test-repath.sh
+      # Two containers (stand-in VPS + node) on an internal network; nft drops
+      # only WireGuard data packets from the node's port, so the handshake stays
+      # fresh while nothing arrives. Timed-out check-ins must move the port.
+      # Seen live: the odd packet got through, so the handshake-age repath
+      # never fired. About three minutes.
+      - name: client/tests/test-repath-silent.sh
+        run: client/tests/test-repath-silent.sh
 
   actionlint:
     name: actionlint

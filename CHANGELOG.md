@@ -4,6 +4,20 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-23
+
+The plugin and the VPS agent are unchanged; the version moves with the tag. Update the tunnel client on each node
+host (`sudo autoproxy-client update`, or the Update button once remote updates are allowed for that node).
+
+- Client: a path that passes handshakes but drops the traffic now recovers by itself too. Seen on a live node: the
+  network dropped nearly every packet of the node's flow towards the VPS (23 sent, 0 received in a minute) but let
+  the odd one through, so the handshake kept renewing and the 0.2.7 handshake-age check never moved the port.
+  The client's two-minute version report goes through the tunnel; when it times out twice in a row (retried after
+  one minute) the client moves to a new local port, which fixed the live case at once. Only a timeout counts: a
+  refused connection or an old agent's answer means packets came back. Needs a 0.3.0 or later VPS agent.
+- New container test `client/tests/test-repath-silent.sh` (in CI): a stand-in VPS and a node, nft dropping only
+  WireGuard data packets from the node's port, the real `run` loop. It fails when the timeout rule is disabled.
+
 ## [0.3.0] - 2026-09-23
 
 Update in this order: VPS agent, then plugin, then clients ([docs/updating.md](docs/updating.md)). The agent update

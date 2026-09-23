@@ -149,6 +149,14 @@ re-resolves the VPS endpoint, then does it again every 3 minutes while the tunne
 changes no key and no config, so it cannot disturb a working tunnel; the VPS follows the new port by
 itself. After 10 minutes `run` still exits so the service manager restarts it.
 
+A path can also fail without the handshake going stale: if the network drops nearly every packet
+towards the VPS but lets the odd one through, handshakes keep renewing while the tunnel carries
+nothing. The two-minute version report (0.3.0 agents and later) notices: when it times out twice in a
+row, retried after one minute, `run` moves the tunnel to a new local port the same way and logs
+`2 reports to the VPS in a row timed out although the handshake looks fresh: moved the tunnel ...`.
+Only a timeout counts. A refused connection or an old agent's 401 means packets did come back, so the
+path works and the port stays.
+
 ## Docker / Compose flavour
 
 ```
