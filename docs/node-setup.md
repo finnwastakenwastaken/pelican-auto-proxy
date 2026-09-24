@@ -137,6 +137,26 @@ exactly one outbound rule, UDP to the VPS on port 51820, and no inbound rules at
 The script can also run the join command for you at the end if you paste it. It only accepts the command in the
 exact form the Setup page prints and refuses anything else, so a mistyped or unexpected paste is never run.
 
+### Let the panel reach this node directly
+
+If the node's hostname points at the VPS (so that its own IP stays hidden, or because players' browsers reach the
+console through the VPS), the panel's own calls to Wings take that detour too. Pelican gives some of those calls one
+second, so a single lost packet on the way makes a node flicker "offline" or breaks the console page. Keep public
+DNS as it is and give only the panel a direct route, with a hosts entry for the node's hostname:
+
+- a node on the panel's own network: its LAN address;
+- a node elsewhere: its own public address, with Wings' port open to the panel's address only.
+
+On a panel in Docker, add the entry to the panel service in `compose.yml` and re-create the container:
+
+```yaml
+    extra_hosts:
+      - "node1.example.com:192.0.2.10"
+```
+
+Nothing else changes: the certificate is still checked against the same hostname, and players and browsers still go
+through the VPS. See [troubleshooting](troubleshooting.md#nodes-flicker-offline-or-the-console-page-shows-403-errors).
+
 ## Scripting it
 
 Every question has a flag and an environment variable, so the whole thing can run unattended with `--yes`:

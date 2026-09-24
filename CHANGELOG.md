@@ -4,6 +4,13 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+- Docs: updating the plugin with the panel's Update button, and what to do when Pelican 1.0.0-beta38 leaves it
+  "Not installed" afterwards (a bug in the panel's update job; press Install). A panel in Docker should mount
+  `/var/www/html/plugins` from the host, or a container update deletes every plugin.
+- Docs: when a node's hostname points at the VPS, give the panel a direct route to Wings (a hosts entry; public DNS
+  unchanged). Pelican allows its status call one second, and the VPS detour made nodes flicker offline and the
+  console page throw 403s (seen on a live panel: 258 timeouts in a day, none after the change).
+
 ## [0.3.2] - 2026-09-24
 
 - Plugin: updating or re-creating the panel's Docker container no longer breaks syncing. The VPS certificate lived

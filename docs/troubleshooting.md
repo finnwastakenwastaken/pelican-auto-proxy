@@ -223,6 +223,28 @@ cause was a wrong token pasted into the plugin, fix that first so it doesn't imm
 Repeated unexpected lockouts from the panel's own address are worth investigating (a stale second copy of the
 plugin's config pointed at the same VPS with an old token is a common cause).
 
+## Nodes flicker offline, or the console page shows 403 errors
+
+**Symptom:** on the panel, nodes or servers briefly show offline, and on a server's console page the browser's
+developer console fills with `POST …/livewire/update 403 (Forbidden)`. The panel's log (`storage/logs/laravel-*.log`)
+has `cURL error 28: Connection timed out after 100x milliseconds` for `https://<node>:<port>/api/servers/…`.
+
+**Cause:** the node's hostname points at the VPS, so the panel reaches Wings through the tunnel. Pelican allows its
+server-status call one second (connect and response together); a lost packet on the VPS path pushes it over. The
+console page's charts re-check that status on every refresh and answer 403 when it comes back unknown, which is
+what the browser shows.
+
+**Command:** from the panel host (or inside the panel container), time the call:
+
+```bash
+curl -s -o /dev/null -w '%{time_total}s %{http_code}\n' https://node1.example.com:8080/api/system
+```
+
+Anything near a second, or varying a lot, is the problem; a direct path is usually well under 0.1 s on a LAN.
+
+**Fix:** give the panel a direct route to the node while public DNS stays pointed at the VPS; see
+[node setup](node-setup.md#let-the-panel-reach-this-node-directly). The 403s stop with the timeouts.
+
 ## "The VPS certificate is missing" after updating the panel
 
 **Symptom:** after updating or re-creating the panel's Docker container, every sync fails with "The VPS certificate

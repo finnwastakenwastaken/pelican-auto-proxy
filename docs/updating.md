@@ -108,19 +108,38 @@ The same `AUTOPROXY_JOIN_CODE` in the compose file keeps it tied to the same pee
 
 ## Plugin
 
-Pelican's one-click plugin update only appears when a plugin publishes an `update_url` the panel can poll — Auto
-Proxy's `plugin.json` sets this, but until the hub listing is live, updating is a manual re-import, the same as a
-first install:
+**Admin → Plugins** shows an **Update** button on the Auto Proxy row when a newer release exists (the panel reads
+the release's `update.json`, which `plugin.json`'s `update_url` points at). Press it; the update runs as a queued
+job, so the panel's queue worker must be running.
 
-1. Download (or build) the new version's zip.
-2. **Admin → Plugins → Import**, upload it. Because the zip's plugin id (`autoproxy`) matches the plugin already on
-   disk, the panel replaces the old plugin folder with the new one — nothing is merged by hand.
-3. The plugin row reads "Not installed" again after a re-import; press **Install**, same as a first install. This is
-   a queued job, so it needs the panel's queue worker (or scheduler-driven queue) running — the same dependency the
-   sync banner already tells you about if it's down.
-4. Confirm the plugin is still **enabled** afterwards; a re-import occasionally resets that flag.
+**If the row reads "Not installed" after the update, press Install.** Pelican 1.0.0-beta38 has a bug in its own
+update job: it replaces the plugin's files, then fails with `Call to a member function query() on null`
+(`PluginService::updatePlugin`, in the panel, not in this plugin) before registering the plugin again. The files are
+already the new version and nothing is lost; **Install** finishes the job. Check that the row then reads
+**Enabled**.
 
-**What survives a plugin update:** your Setup configuration (VPS endpoint, token, certificate), every node's mode
+Without the button (an air-gapped panel, or to install a specific version):
+
+1. Download the version's zip from the release page.
+2. **Admin → Plugins → Import**, upload it. The zip's plugin id (`autoproxy`) matches the plugin already on disk,
+   so the panel replaces the old folder with the new one.
+3. The row reads "Not installed" after a re-import; press **Install**, same as a first install.
+4. Confirm the plugin is **enabled** afterwards.
+
+**A panel in Docker:** the official Pelican image keeps `/var/www/html/plugins` inside the container, so updating
+or re-creating the panel container deletes every installed plugin. Mount it from the host before your next panel
+update, for example in the panel's `compose.yml`:
+
+```yaml
+    volumes:
+      - ./plugins:/var/www/html/plugins
+```
+
+Copy the current plugins out first (`docker cp <panel container>:/var/www/html/plugins ./plugins`, keeping the
+owner the web user inside the container, uid 82 in the official image), then re-create the container.
+
+**What survives a plugin update:** your Setup configuration (VPS endpoint, token, certificate; since 0.3.2 the
+certificate also has a copy in the database, so re-creating the panel container no longer loses it), every node's mode
 and peer state, manual forwards, and settings — these live in the plugin's own database tables, which Laravel's
 migrator only ever adds to for a new version, never drops or recreates. You will not need to re-paste the VPS code
 or re-run any join command just because the plugin itself updated.
