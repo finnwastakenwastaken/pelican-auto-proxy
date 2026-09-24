@@ -223,6 +223,21 @@ cause was a wrong token pasted into the plugin, fix that first so it doesn't imm
 Repeated unexpected lockouts from the panel's own address are worth investigating (a stale second copy of the
 plugin's config pointed at the same VPS with an old token is a common cause).
 
+## "The VPS certificate is missing" after updating the panel
+
+**Symptom:** after updating or re-creating the panel's Docker container, every sync fails with "The VPS certificate
+is missing from …/storage/app/autoproxy/agent.pem". Forwards that were already open keep working (the VPS keeps
+them), but no change reaches the VPS.
+
+**Cause:** the plugin keeps the VPS's certificate in the panel's storage folder, and the official Pelican Docker
+image keeps that folder inside the container, so a new container starts without it. Before 0.3.2 that file was the
+only copy.
+
+**Fix:** since 0.3.2 the plugin also keeps a copy in the database and writes the file back by itself. An install
+that lost the file before updating to 0.3.2 needs the VPS code pasted once more (Setup, step 1); the code is printed
+again on the VPS with `sudo autoproxy-agent show-code`. Restoring cannot weaken the check: every request still pins
+the certificate's public key, which is stored separately.
+
 ## Certificate error after VPS IP change
 
 **Symptom:** the plugin suddenly reports a certificate mismatch or connection failure after the VPS's public IP

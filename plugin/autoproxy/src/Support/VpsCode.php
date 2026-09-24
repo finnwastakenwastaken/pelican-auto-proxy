@@ -110,6 +110,9 @@ class VpsCode
             'tunnel_subnet' => $code['tunnel_subnet'],
             'vps_tunnel_ip' => $code['vps_tunnel_ip'],
             'agent_version' => $code['agent_version'],
+            // The file above is what curl reads; this copy is what survives a
+            // panel container re-create (see AutoProxySettings::ensureCertificate).
+            'api_ca_pem' => (string) $code['api_ca_pem'],
         ]);
     }
 

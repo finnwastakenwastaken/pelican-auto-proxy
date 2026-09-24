@@ -27,7 +27,7 @@ class AutoProxySettings
     /** Everything the VPS code fills in. Kept in one place so Setup can clear it. */
     public const FROM_VPS_CODE = [
         'api_url', 'api_token', 'api_spki_sha256', 'endpoint_ip', 'api_port',
-        'wg_pubkey', 'wg_port', 'tunnel_subnet', 'vps_tunnel_ip', 'agent_version',
+        'wg_pubkey', 'wg_port', 'tunnel_subnet', 'vps_tunnel_ip', 'agent_version', 'api_ca_pem',
     ];
 
     /** @var array<string, mixed>|null */
@@ -147,7 +147,56 @@ class AutoProxySettings
 
     public static function certExists(): bool
     {
-        return is_file(static::certPath());
+        return static::ensureCertificate();
+    }
+
+    /**
+     * Makes sure the certificate file is there, and that the database holds a
+     * copy of it. The file lives in the panel's storage folder, which the
+     * official Pelican Docker image keeps inside the container: updating or
+     * re-creating the panel container wiped it, and every sync then failed
+     * with "certificate missing" until the VPS code was pasted again (seen on
+     * a live panel). The database survives, so it now holds the copy.
+     *
+     * - file and copy present: nothing to do;
+     * - file present, no copy (installed before this version): copy it in;
+     * - copy present, file gone: write the file back.
+     *
+     * Restoring cannot weaken trust: the certificate only ever came from the
+     * pasted VPS code, and every request still pins the key's SPKI hash,
+     * which is stored separately.
+     */
+    public static function ensureCertificate(): bool
+    {
+        $path = static::certPath();
+        $copy = (string) static::get('api_ca_pem', '');
+
+        if (is_file($path)) {
+            if ($copy === '') {
+                $pem = (string) @file_get_contents($path);
+                if (str_contains($pem, '-----BEGIN CERTIFICATE-----')) {
+                    try {
+                        static::set('api_ca_pem', $pem);
+                    } catch (Throwable) {
+                        // Settings table unavailable: the file still works.
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        if ($copy === '' || !str_contains($copy, '-----BEGIN CERTIFICATE-----')) {
+            return false;
+        }
+
+        try {
+            VpsCode::writeCertificate($copy);
+        } catch (Throwable) {
+            return false;
+        }
+
+        return is_file($path);
     }
 
     // --- publishing ---------------------------------------------------------

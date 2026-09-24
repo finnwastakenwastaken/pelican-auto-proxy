@@ -278,10 +278,12 @@ class AgentClient
     {
         $path = AutoProxySettings::certPath();
 
-        if (!is_file($path)) {
+        if (!AutoProxySettings::ensureCertificate()) {
             throw new AutoProxyException(
                 'The VPS certificate is missing from ' . $path . ', so the panel cannot prove it is talking to your VPS. '
-                . 'Open Auto Proxy -> Setup and paste the VPS code again.'
+                . 'Open Auto Proxy -> Setup and paste the VPS code again. (Before plugin 0.3.2 the certificate was kept '
+                . 'only in that folder, which updating the panel container wipes; pasting the code once more also stores '
+                . 'a copy in the database, so it is restored automatically from then on.)'
             );
         }
 

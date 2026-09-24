@@ -4,6 +4,16 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-24
+
+- Plugin: updating or re-creating the panel's Docker container no longer breaks syncing. The VPS certificate lived
+  only in the panel's storage folder, which the official Pelican image keeps inside the container; afterwards every
+  sync failed with "The VPS certificate is missing" until the VPS code was pasted again (seen on a live panel). The
+  plugin now also keeps a copy in the database, copies an existing file there after the update, and writes the file
+  back when it is missing. A wrong certificate restored this way is still refused: every request pins the key's
+  SPKI hash, stored separately (tested with a different certificate). An install that already lost the file needs
+  the VPS code pasted once more; see [docs/troubleshooting.md](docs/troubleshooting.md).
+
 ## [0.3.1] - 2026-09-23
 
 The plugin and the VPS agent are unchanged; the version moves with the tag. Update the tunnel client on each node

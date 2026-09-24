@@ -14,7 +14,8 @@ token by hand anywhere on this page.
 **Step 1 — connect to the VPS.** Paste the VPS code printed by `install-vps.sh` (see
 [install-vps.md](install-vps.md)). Press **Test connection**. A green state means the panel reached the agent's
 HTTPS API and the certificate matched what the code promised; the plugin stores the endpoint, port, pinned
-certificate and token from here on. A red state means the panel could not reach that address and port — check this
+certificate and token from here on (the token encrypted in the database; the certificate as a file in the panel's
+storage folder plus a copy in the database, so updating the panel container does not lose it). A red state means the panel could not reach that address and port — check this
 from wherever the panel itself runs, since a panel hosted elsewhere needs its own network path to the VPS.
 
 **Step 2 — add nodes.** One row per Pelican node. For each node you want reachable:
