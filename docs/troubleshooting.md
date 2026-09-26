@@ -229,7 +229,8 @@ plugin's config pointed at the same VPS with an old token is a common cause).
 developer console fills with `POST …/livewire/update 403 (Forbidden)`. The panel's log (`storage/logs/laravel-*.log`)
 has `cURL error 28: Connection timed out after 100x milliseconds` for `https://<node>:<port>/api/servers/…`.
 
-**Cause:** the node's hostname points at the VPS, so the panel reaches Wings through the tunnel. Pelican allows its
+**Cause:** the node's hostname points at the VPS, so the panel reaches Wings through the tunnel. From 0.3.3 the
+Status page says so per node, under "The panel reaches these nodes through the VPS". Pelican allows its
 server-status call one second (connect and response together); a lost packet on the VPS path pushes it over. The
 console page's charts re-check that status on every refresh and answer 403 when it comes back unknown, which is
 what the browser shows.

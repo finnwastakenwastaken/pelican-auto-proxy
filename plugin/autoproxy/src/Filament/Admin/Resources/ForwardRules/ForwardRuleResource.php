@@ -142,6 +142,36 @@ class ForwardRuleResource extends Resource
         return $out;
     }
 
+    /**
+     * peer id => mode ("real" or "site") for every client the VPS knows, for
+     * ForwardRuleInput::targetPeerError() and viaPeerError(). Empty when the VPS
+     * cannot be reached, and those checks then leave the choice to the picker.
+     *
+     * @return array<string, string>
+     */
+    public static function peerModes(): array
+    {
+        try {
+            $peers = app(AgentClient::class)->peers();
+        } catch (AutoProxyException) {
+            return [];
+        } catch (Throwable) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach ($peers as $peer) {
+            $id = (string) ($peer['id'] ?? '');
+
+            if ($id !== '') {
+                $out[$id] = (string) ($peer['mode'] ?? '');
+            }
+        }
+
+        return $out;
+    }
+
     public static function form(Schema $schema): Schema
     {
         return $schema->components([
@@ -213,6 +243,20 @@ class ForwardRuleResource extends Resource
                         ->options(fn () => static::peerOptions('real'))
                         ->visible(fn (Get $get): bool => $get('target_kind') === ForwardRule::TARGET_PEER)
                         ->required(fn (Get $get): bool => $get('target_kind') === ForwardRule::TARGET_PEER)
+                        ->rule(static function (Get $get): Closure {
+                            // Shared with `autoproxy:setup add-forward --target-peer`.
+                            return static function (string $attribute, mixed $value, Closure $fail) use ($get): void {
+                                if ($get('target_kind') !== ForwardRule::TARGET_PEER) {
+                                    return;
+                                }
+
+                                $error = ForwardRuleInput::targetPeerError(is_string($value) ? $value : null, static::peerModes());
+
+                                if ($error !== null) {
+                                    $fail($error);
+                                }
+                            };
+                        })
                         ->helperText('Real-IP clients only: traffic is handed straight to that machine, so it sees the real client address. Empty list means there is no real-IP client, or the VPS could not be reached.'),
 
                     TextInput::make('target_ip')
@@ -247,6 +291,20 @@ class ForwardRuleResource extends Resource
                         ->live()
                         ->visible(fn (Get $get): bool => $get('target_kind') === ForwardRule::TARGET_LAN)
                         ->required(fn (Get $get): bool => $get('target_kind') === ForwardRule::TARGET_LAN)
+                        ->rule(static function (Get $get): Closure {
+                            // Shared with `autoproxy:setup add-forward --via`.
+                            return static function (string $attribute, mixed $value, Closure $fail) use ($get): void {
+                                if ($get('target_kind') !== ForwardRule::TARGET_LAN) {
+                                    return;
+                                }
+
+                                $error = ForwardRuleInput::viaPeerError(is_string($value) ? $value : null, static::peerModes());
+
+                                if ($error !== null) {
+                                    $fail($error);
+                                }
+                            };
+                        })
                         ->helperText('Site clients only: which tunnel client sits on that LAN. The target shares that client\'s address, so the service sees one IP for everybody. Empty list means there is no site client yet.'),
 
                     TextInput::make('target_port')

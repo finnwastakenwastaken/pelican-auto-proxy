@@ -4,6 +4,34 @@ All notable changes are recorded here. Format: Keep a Changelog. Versions: SemVe
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-26
+
+Update the VPS agent only if you want its setup output fixed (below); nothing else changes on the VPS. Update the
+plugin. Clients are unchanged apart from the version number.
+
+- **Plugin: warns when the panel reaches a node's Wings through the VPS.** When a node's hostname resolves to the
+  VPS from the panel, the panel's own calls to Wings take the tunnel; Pelican allows its status call one second, so
+  the node flickers offline and its console page shows 403 errors. The Status page now names each such node, says
+  what to do and links to [Let the panel reach this node directly](docs/node-setup.md#let-the-panel-reach-this-node-directly);
+  the dashboard banner lists it too. The lookup (`getent ahosts`, which honours `/etc/hosts`, two seconds per name)
+  runs from the scheduled sync every ten minutes; pages only read the stored answer. **Check again** on the Status
+  page looks at once. A lookup that fails is never reported as a problem.
+- **Plugin: `autoproxy:setup add-forward --target-peer=<peer id>`** creates a manual forward to a machine running
+  its own real-IP tunnel client, for example Wings (8080) or SFTP (2022) on a proxied node. Until now that needed
+  the Forwards page. It shares its checks with the Forwards form (`ForwardRuleInput::targetPeerError()` and the new
+  `viaPeerError()`), and the form now also refuses a client of the wrong mode in either picker with the same
+  sentence, instead of at push time. `--target-ip` with `--via` works as before; both or neither is refused.
+- **VPS agent: setup no longer warns "MISSING peer-routing ip rule" on every install.** The check looked for the
+  rule as it is typed (`not fwmark 0x2b lookup 201`), not as `ip rule show` prints it (`not from all fwmark 0x2b
+  lookup 201`), so it never matched, and because the rule was plainly there when checked by hand a moment later it
+  looked like a timing problem. It now uses the same matcher that installs the rule and looks up to six times,
+  half a second apart, before warning. The container gate (`scripts/vps-test`) asserts the verification block.
+- **Docker image of the client is published.** Each release now pushes `ghcr.io/finnwastakenwastaken/autoproxy-client`
+  as `:vX.Y.Z` and `:latest` (linux/amd64), which `docs/install-client.md` and the Setup page's Compose snippet
+  already pointed at. The image reports the release number instead of `dev` (`client/Dockerfile` takes
+  `AUTOPROXY_VERSION` as a build argument and stamps it like the tarball), and the workflow checks that its script is
+  byte for byte the one in `autoproxy-client.tar.gz` before pushing. A manual (dry) run builds and checks it without
+  pushing.
 - Docs: updating the plugin with the panel's Update button, and what to do when Pelican 1.0.0-beta38 leaves it
   "Not installed" afterwards (a bug in the panel's update job; press Install). A panel in Docker should mount
   `/var/www/html/plugins` from the host, or a container update deletes every plugin.

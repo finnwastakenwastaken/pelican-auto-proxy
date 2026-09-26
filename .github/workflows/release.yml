@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: write
+  # The Docker flavour of the client is pushed to ghcr.io with the workflow's
+  # own token; nothing is pushed on a dry run.
+  packages: write
 
 jobs:
   release:
@@ -93,6 +96,53 @@ jobs:
           # The .sha256 sidecar exists for local AUTOPROXY_LOCAL_TARBALL testing;
           # the release publishes SHA256SUMS instead.
           rm -f dist/autoproxy-client.tar.gz.sha256
+
+      # The Docker flavour, built from client/Dockerfile with the same version
+      # stamped in. Built and checked on every run; pushed only on a tag (see
+      # "push the client image" below). Plain docker CLI on the runner, no
+      # third-party actions.
+      - name: build the client image (version stamped in)
+        id: image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DRY_RUN: ${{ steps.version.outputs.dry_run }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/autoproxy-client"
+          # The plugin's Setup page prints this image name in its Compose snippet
+          # (config/autoproxy.php, docker_image). Publishing under another name
+          # would leave every generated snippet pointing at nothing.
+          configured="$(sed -n "s/^[[:space:]]*'docker_image' => '\([^':]*\)\(:[^']*\)\{0,1\}',.*/\1/p" plugin/autoproxy/config/autoproxy.php)"
+          if [ "$configured" != "$image" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "::warning::dry run on ${GITHUB_REPOSITORY}: the plugin tells users to pull '$configured', this repository would push '$image'. A real tag here would fail this check."
+            else
+              echo "the plugin tells users to pull '$configured' (config/autoproxy.php) but this repository pushes '$image'" >&2
+              exit 1
+            fi
+          fi
+          docker build \
+            --build-arg "AUTOPROXY_VERSION=${VERSION}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "${image}:${TAG}" -t "${image}:latest" \
+            client
+          # Read it back: the image must report the release number, and carry
+          # byte for byte the script that is in autoproxy-client.tar.gz.
+          reported="$(docker run --rm "${image}:${TAG}" version)"
+          if [ "$reported" != "autoproxy-client ${VERSION}" ]; then
+            echo "the image reports '$reported', expected 'autoproxy-client ${VERSION}'" >&2
+            exit 1
+          fi
+          docker run --rm --entrypoint cat "${image}:${TAG}" /usr/local/bin/autoproxy-client > "$RUNNER_TEMP/image-client"
+          tar -xzOf dist/autoproxy-client.tar.gz autoproxy-client > "$RUNNER_TEMP/tarball-client"
+          if ! cmp "$RUNNER_TEMP/image-client" "$RUNNER_TEMP/tarball-client"; then
+            echo "the script in the image differs from the one in autoproxy-client.tar.gz" >&2
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "built ${image}:${TAG} and :latest ($reported)"
 
       - name: package plugin zip (plugin.json at zip root)
         env:
@@ -185,6 +235,20 @@ jobs:
           name: release-dry-run-${{ steps.version.outputs.tag }}
           path: dist/
           if-no-files-found: error
+
+      # Only after every asset above was built and checked, and only on a tag.
+      # A dry run stops at the build and the checks.
+      - name: push the client image to ghcr.io (vX.Y.Z and latest)
+        if: steps.version.outputs.dry_run != 'true'
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          TAG: ${{ steps.version.outputs.tag }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
+          docker logout ghcr.io
 
       - name: create GitHub release
         if: steps.version.outputs.dry_run != 'true'

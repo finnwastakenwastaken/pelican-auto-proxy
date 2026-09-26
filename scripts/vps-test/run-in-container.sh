@@ -162,6 +162,15 @@ if grep -qE 'not .*fwmark 0x2b lookup 201' /tmp/iprule.txt; then
 else
 	bad "the peer-routing ip rule is missing after setup"; cat /tmp/iprule.txt
 fi
+# Setup's own verification block has to agree with "ip rule show". Before
+# 0.3.3 it matched the rule as typed, not as printed, and warned "MISSING
+# peer-routing ip rule" on every install while the rule was in place.
+if grep -q 'OK      peer-routing ip rule is installed' /tmp/setup.log \
+	&& ! grep -q 'MISSING peer-routing' /tmp/setup.log; then
+	ok "setup's verification block reports the peer-routing rule as installed"
+else
+	bad "setup's verification block disagrees with ip rule show"; grep -A8 '=== Verification' /tmp/setup.log
+fi
 
 step "the VPS code"
 CODE=$(cat /etc/autoproxy/vps-code)

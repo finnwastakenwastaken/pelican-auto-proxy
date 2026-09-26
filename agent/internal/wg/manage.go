@@ -313,6 +313,15 @@ func (m Manager) EnsureRoutingRule() error {
 	return err
 }
 
+// HasRoutingRule reports whether the peer-routing rule is installed, using the
+// same field-by-field match as EnsureRoutingRule. Anything that asks "is the
+// rule there?" goes through here, so no caller can fall back into matching the
+// command as it was typed instead of as "ip rule show" prints it.
+func (m Manager) HasRoutingRule() bool {
+	out, _ := m.query(m.ipBin(), "rule", "show")
+	return m.hasRule(out)
+}
+
 // RemoveRoutingRule undoes EnsureRoutingRule. The rule outlives the wg
 // interface -- it names a table and a fwmark, not a device -- so deleting the
 // interface (what uninstall and peer teardown otherwise rely on to clean up

@@ -25,6 +25,37 @@
             </div>
         @endif
 
+        @if (count($wingsDetours))
+            <div class="lg:col-span-2">
+                <x-filament::section>
+                    <x-slot name="heading">
+                        <span class="text-warning-600 dark:text-warning-400">The panel reaches these nodes through the VPS ({{ count($wingsDetours) }})</span>
+                    </x-slot>
+                    <x-slot name="description">
+                        Their hostnames resolve to the VPS from this panel, so the panel's own calls to Wings take the tunnel.
+                        Pelican gives its server-status call one second, so a single lost packet on that detour makes a node
+                        flicker offline and the console page show 403 errors. Players are not affected.
+                    </x-slot>
+
+                    <ul class="list-disc space-y-1 ps-5 text-sm text-gray-700 dark:text-gray-300">
+                        @foreach ($wingsDetours as $row)
+                            <li>{{ $row['message'] }}</li>
+                        @endforeach
+                    </ul>
+
+                    <p class="mt-3 text-sm text-gray-600 dark:text-gray-400">
+                        How to fix it: <a class="text-primary-600 hover:underline dark:text-primary-400" href="{{ $wingsDocsUrl }}" target="_blank" rel="noopener">Let the panel reach this node directly</a>
+                        (and the <a class="text-primary-600 hover:underline dark:text-primary-400" href="{{ $wingsTroubleshootingUrl }}" target="_blank" rel="noopener">troubleshooting entry</a>).
+                        Checked {{ $wingsCheckedAt?->diffForHumans() ?? 'not yet' }} from this panel, and again every ten minutes.
+                    </p>
+
+                    <div class="mt-3">
+                        <x-filament::button size="sm" color="gray" icon="tabler-refresh" wire:click="recheckWingsRoute">Check again</x-filament::button>
+                    </div>
+                </x-filament::section>
+            </div>
+        @endif
+
         <x-filament::section>
             <x-slot name="heading">VPS</x-slot>
             <x-slot name="description">Live, {{ config('autoproxy.status_timeout', 2) }} second timeout. {{ $apiUrl ?: 'no VPS connected' }}</x-slot>

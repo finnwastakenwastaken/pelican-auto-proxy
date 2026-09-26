@@ -69,6 +69,8 @@ php artisan autoproxy:setup client-join-command <peer-id>
 php artisan autoproxy:setup remove-client <peer-id>
 
 php artisan autoproxy:setup forwards
+php artisan autoproxy:setup add-forward --name="wings api" --proto=tcp --public-port=8080 \
+    --target-peer=<peer-id> [--target-port=8080] [--notes="..."] [--disabled]
 php artisan autoproxy:setup add-forward --name="panel" --proto=tcp --public-port=8080 \
     --target-ip=10.0.0.10 --via=<peer-id> [--target-port=80] [--notes="..."] [--disabled]
 php artisan autoproxy:setup add-forward --name="game range" --proto=both --public-port=27000 \
@@ -90,13 +92,18 @@ without `--yes`.
 `remove-client` deletes the client and closes its ports, and switches off any node reached through it. It refuses a
 client that belongs to a node — use `disable-node` for those, so the panel's copy is cleared too.
 
-`add-forward` creates a manual forward to an address on a LAN through a site client, and pushes it straight away.
-It is checked against exactly the same rules as the Forwards form, in the same words: a private (RFC1918) target
-only, inside the LAN ranges that client covers, ports in 1–65535, a range end at or above the start, and no target
-port on a range. `remove-forward` deletes one by the id `forwards` shows, and pushes.
+`add-forward` creates a manual forward and pushes it straight away. It takes one of the two destinations the
+Forwards form offers:
 
-Forwards to a machine that runs its own real-IP client (`target_peer`) are a form-only option for now; the command
-covers the LAN case, which is the one site mode needs.
+- `--target-peer=<peer-id>`: a machine that runs its own real-IP tunnel client, which sees real client addresses.
+  This is how Wings' API (8080) and SFTP (2022) on a proxied node are published: the node's peer id is in the
+  `nodes` and `clients` lists. The client must be in real-IP mode; a site client is refused.
+- `--target-ip=<address> --via=<peer-id>`: an address on a LAN, reached through the site client on that LAN.
+
+Giving both, or neither, is refused. Everything is checked against exactly the same rules as the Forwards form, in
+the same words: the right kind of client for each destination, a private (RFC1918) LAN target inside the ranges its
+client covers, ports in 1–65535, a range end at or above the start, and no target port on a range.
+`remove-forward` deletes one by the id `forwards` shows, and pushes.
 
 The Setup page stays the normal path, and the one this page describes. The plugin's other command is
 `autoproxy:sync`, run every minute by the panel's scheduler (see "Sync timing" below).
@@ -135,6 +142,14 @@ open on a second screen while you fix something. **Sync now** and **Test VPS** s
 
 - **Tunnel clients that are not connected**: proxied nodes whose tunnel client has not handshaked inside the warn
   window, or never has. Their ports are open on the VPS with nothing behind them, which players see as a timeout.
+- **The panel reaches these nodes through the VPS**: nodes whose hostname resolves to the VPS's address from the
+  panel itself (a hosts entry counts, which is the fix). The panel's own calls to Wings then take the tunnel, and
+  Pelican gives its status call one second, so those nodes flicker offline and their console pages show 403 errors.
+  Each entry names the node, the hostname and what to do, and links to
+  [Let the panel reach this node directly](node-setup.md#let-the-panel-reach-this-node-directly). The lookups run in
+  the background from the scheduled sync, every ten minutes, a two-second limit per name; the page only reads the
+  stored answer, so it never waits on DNS. **Check again** looks again now, after you added the hosts entry. A name
+  that could not be looked up is not reported.
 - **Agent**: live answer from the VPS — version, uptime, how many rules are currently applied, and the freshest
   WireGuard handshake age across all peers. "Unreachable" here means the panel cannot push new rules to the VPS
   right now; it does not mean players are disconnected — the VPS keeps serving whatever it last applied.
@@ -182,6 +197,9 @@ which of these it is — a banner with no reason attached would be useless to ac
   either rule and both return.
 - **"N public allocation(s) are not forwarded because their node is only half set up"** — that node has no tunnel
   client yet, or no LAN IP for site mode. The Status page names them.
+- **"The panel reaches node X through the VPS"** — that node's hostname resolves to the VPS from the panel, so the
+  node can flicker offline and its console page can show 403 errors. The Status page says what to do. Read from the
+  stored result of the background check, never looked up by the dashboard itself.
 - **"No node is proxied yet"**, or **"N allocation(s) carry the public alias on a node that is not proxied"** — a
   node was never switched on in Setup step 2, so its ports stay closed. See "node not proxied" in
   [troubleshooting.md](troubleshooting.md).

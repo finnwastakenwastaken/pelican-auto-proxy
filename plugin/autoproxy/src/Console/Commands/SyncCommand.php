@@ -3,7 +3,10 @@
 namespace Arrowtje\AutoProxy\Console\Commands;
 
 use Arrowtje\AutoProxy\Services\SyncService;
+use Arrowtje\AutoProxy\Services\WingsRouteCheck;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
+use Arrowtje\AutoProxy\Support\WingsRoute;
+use Throwable;
 use Illuminate\Console\Command;
 
 class SyncCommand extends Command
@@ -23,6 +26,8 @@ class SyncCommand extends Command
         }
 
         $result = $sync->run((bool) $this->option('force'));
+
+        $this->checkWingsRoute();
 
         if (!$result->ok) {
             $this->error($result->summary());
@@ -49,5 +54,23 @@ class SyncCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Whether the panel reaches any node's Wings through the VPS. Looked up at
+     * most every ten minutes, here in the background, so the Status page and
+     * the dashboard only ever read the stored answer. It never fails the sync.
+     */
+    protected function checkWingsRoute(): void
+    {
+        try {
+            $checked = WingsRouteCheck::refreshIfDue();
+        } catch (Throwable) {
+            return;
+        }
+
+        foreach ($checked['findings'] ?? [] as $row) {
+            $this->warn(WingsRoute::message($row, (string) $checked['vps_ip']));
+        }
     }
 }

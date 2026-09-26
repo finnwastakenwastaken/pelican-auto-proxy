@@ -66,6 +66,7 @@ require __DIR__ . '/../plugin/autoproxy/src/Support/PeerHealth.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/ForwardRuleInput.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/ClientInput.php';
 require __DIR__ . '/../plugin/autoproxy/src/Support/ClientVersion.php';
+require __DIR__ . '/../plugin/autoproxy/src/Support/WingsRoute.php';
 
 use Arrowtje\AutoProxy\Services\RuleSetBuilder;
 use Arrowtje\AutoProxy\Support\ClientInput;
@@ -73,6 +74,7 @@ use Arrowtje\AutoProxy\Support\ClientVersion;
 use Arrowtje\AutoProxy\Support\ForwardRuleInput;
 use Arrowtje\AutoProxy\Support\Ip;
 use Arrowtje\AutoProxy\Support\PeerHealth;
+use Arrowtje\AutoProxy\Support\WingsRoute;
 use PDO;
 
 $failures = 0;
@@ -466,6 +468,20 @@ check('a nameless forward is refused',
 check('an over-long name is refused',
     ForwardRuleInput::nameError(str_repeat('a', ForwardRuleInput::NAME_MAX + 1)) !== null);
 
+// A forward straight to a real-IP client (Wings on a proxied node) and the site
+// client a LAN target goes through: the agent refuses the wrong mode in either
+// place. To watch this fail, drop the mode test from
+// ForwardRuleInput::targetPeerError(): "a site client cannot be a target" goes red.
+$modes = ['wings-1' => 'real', 'office' => 'site'];
+check('a real-IP client can be a target', ForwardRuleInput::targetPeerError('wings-1', $modes) === null);
+check('a site client cannot be a target', ForwardRuleInput::targetPeerError('office', $modes) !== null);
+check('an unknown client cannot be a target', ForwardRuleInput::targetPeerError('gone', $modes) !== null);
+check('no client chosen is refused', ForwardRuleInput::targetPeerError('  ', $modes) !== null);
+check('an unreachable VPS leaves the target to the picker', ForwardRuleInput::targetPeerError('wings-1', []) === null);
+check('a site client can carry a LAN target', ForwardRuleInput::viaPeerError('office', $modes) === null);
+check('a real-IP client cannot carry a LAN target', ForwardRuleInput::viaPeerError('wings-1', $modes) !== null);
+check('an unknown client cannot carry a LAN target', ForwardRuleInput::viaPeerError('gone', $modes) !== null);
+
 check('a client needs a name',
     ClientInput::parse('', '10.0.0.0/24')['error'] !== null);
 check('a client needs at least one LAN range',
@@ -541,6 +557,67 @@ check('progress: nothing to say', ClientVersion::progress([], $now) === null);
 
 check('progress: "updated" is dropped once the client runs another version (moved by hand since)',
     ClientVersion::progress(['version' => '0.3.0', 'update' => ['state' => 'updated', 'version' => '0.3.4', 'error' => '', 'request_id' => 'r3', 'at' => '2026-09-23T11:00:00Z']], $now) === null);
+
+// --- the panel reaching Wings through the VPS (0.3.3) ------------------------
+//
+// To watch this gate fail on purpose, change `$resolved[$host] ?? null` in
+// WingsRoute::detours() to `?? ['203.0.113.10']` (an unknown answer read as
+// "the VPS"): "a name that could not be looked up is not reported" goes red;
+// or disable the ::ffff: branch in normaliseAddress(): "a v4-mapped answer
+// still counts" goes red.
+
+$vpsIp = '203.0.113.10';
+$wNodes = [
+    1 => ['name' => 'wings-1', 'fqdn' => 'node1.example.com'],
+    2 => ['name' => 'wings-2', 'fqdn' => 'Node2.Example.com.'],
+    3 => ['name' => 'lan-node', 'fqdn' => '10.0.0.20'],
+    4 => ['name' => 'odd-node', 'fqdn' => '203.0.113.10'],
+    5 => ['name' => 'unknown', 'fqdn' => 'node5.example.com'],
+];
+$getent = "203.0.113.10    STREAM node1.example.com\n203.0.113.10    DGRAM  \n203.0.113.10    RAW    \n";
+check('getent output: one address per line, listed once',
+    WingsRoute::parseGetent($getent) === ['203.0.113.10']);
+check('getent output: both families are kept',
+    WingsRoute::parseGetent("2001:db8::1 STREAM x\n192.0.2.5 STREAM\n") === ['2001:db8::1', '192.0.2.5']);
+check('hostnames to look up: normalised, once each, no IP literals',
+    WingsRoute::hostsToResolve($wNodes + [6 => ['name' => 'dup', 'fqdn' => 'node1.example.com']]) === ['node1.example.com', 'node2.example.com', 'node5.example.com']);
+
+$resolved = [
+    'node1.example.com' => ['203.0.113.10'],     // points at the VPS
+    'node2.example.com' => ['10.0.0.21'],        // hosts entry in place: direct
+    'node5.example.com' => null,                  // lookup timed out
+];
+$found = WingsRoute::detours($wNodes, $resolved, $vpsIp);
+check('a hostname that resolves to the VPS is reported',
+    in_array(1, array_column($found, 'node_id'), true));
+check('a hostname with a hosts entry to the node is not reported',
+    !in_array(2, array_column($found, 'node_id'), true));
+check('a node addressed by a LAN IP is not reported',
+    !in_array(3, array_column($found, 'node_id'), true));
+check('a node whose address IS the VPS address is reported, as a literal',
+    ($found[1]['node_id'] ?? null) === 4 && $found[1]['literal'] === true);
+check('a name that could not be looked up is not reported',
+    !in_array(5, array_column($found, 'node_id'), true));
+check('exactly those two', count($found) === 2);
+check('a name with several addresses counts when one is the VPS',
+    count(WingsRoute::detours([1 => $wNodes[1]], ['node1.example.com' => ['192.0.2.7', '203.0.113.10']], $vpsIp)) === 1);
+check('a v4-mapped answer still counts',
+    count(WingsRoute::detours([1 => $wNodes[1]], ['node1.example.com' => ['::ffff:203.0.113.10']], $vpsIp)) === 1);
+check('a name that does not resolve at all is not reported',
+    WingsRoute::detours([1 => $wNodes[1]], ['node1.example.com' => []], $vpsIp) === []);
+check('no VPS address (not connected) reports nothing',
+    WingsRoute::detours($wNodes, $resolved, '') === []);
+check('a finding for a node that was deleted or renamed since is dropped',
+    count(WingsRoute::stillCurrent($found, [1 => 'node1.example.com', 4 => 'node4.example.com'])) === 1);
+check('a finding is kept while the node and its hostname are unchanged',
+    count(WingsRoute::stillCurrent($found, [1 => 'NODE1.example.com.', 4 => '203.0.113.10'])) === 2);
+check('re-checked after ten minutes, not before',
+    !WingsRoute::isDue(1000, 1000 + 599, 600) && WingsRoute::isDue(1000, 1000 + 600, 600) && WingsRoute::isDue(null, 5, 600));
+check('the message names the node, the hostname and the VPS address, and says what to do',
+    str_contains($m = WingsRoute::message($found[0], $vpsIp), 'wings-1') && str_contains($m, 'node1.example.com')
+    && str_contains($m, $vpsIp) && str_contains($m, 'hosts entry'));
+check('the docs link points at the section that explains the fix',
+    WingsRoute::DOCS_PAGE === 'node-setup.md#let-the-panel-reach-this-node-directly');
 
 echo "\n$checks checks, $failures failure(s)\n";
 exit($failures === 0 ? 0 : 1);

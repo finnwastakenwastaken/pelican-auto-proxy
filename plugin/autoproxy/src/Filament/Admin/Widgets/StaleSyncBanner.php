@@ -6,8 +6,10 @@ use Arrowtje\AutoProxy\Filament\Admin\Pages\AutoProxyStatus;
 use Arrowtje\AutoProxy\Filament\Admin\Pages\Setup;
 use Arrowtje\AutoProxy\Models\NodeSetting;
 use Arrowtje\AutoProxy\Models\SyncState;
+use Arrowtje\AutoProxy\Services\WingsRouteCheck;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
 use Arrowtje\AutoProxy\Support\PeerHealth;
+use Arrowtje\AutoProxy\Support\WingsRoute;
 use Filament\Widgets\Widget;
 use Illuminate\Database\QueryException;
 use Throwable;
@@ -25,8 +27,8 @@ class StaleSyncBanner extends Widget
     /**
      * Filament loads widgets lazily by default, which for a red alert means the
      * dashboard paints "everything is fine" first and the warning arrives later,
-     * or never if it is below the fold. It costs two queries and no HTTP call, so
-     * it is rendered with the page.
+     * or never if it is below the fold. It costs a few queries and a cache read,
+     * no HTTP call and no DNS lookup, so it is rendered with the page.
      */
     protected static bool $isLazy = false;
 
@@ -93,6 +95,12 @@ class StaleSyncBanner extends Widget
 
         foreach (static::unhealthyPeers($state) as $row) {
             $problems[] = PeerHealth::message($row);
+        }
+
+        // The stored result of the last lookup, never a lookup of its own:
+        // autoproxy:sync refreshes it every ten minutes in the background.
+        foreach (WingsRouteCheck::current() as $row) {
+            $problems[] = WingsRoute::shortMessage($row);
         }
 
         if (static::noNodeProxied()) {

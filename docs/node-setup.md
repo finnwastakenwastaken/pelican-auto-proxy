@@ -157,6 +157,10 @@ On a panel in Docker, add the entry to the panel service in `compose.yml` and re
 Nothing else changes: the certificate is still checked against the same hostname, and players and browsers still go
 through the VPS. See [troubleshooting](troubleshooting.md#nodes-flicker-offline-or-the-console-page-shows-403-errors).
 
+From 0.3.3 the plugin checks this for you: Auto Proxy → Status (and the dashboard banner) names every node whose
+hostname resolves to the VPS from the panel. It looks again every ten minutes; **Check again** on the Status page
+looks at once, so you can see the warning go after adding the entry.
+
 ## Scripting it
 
 Every question has a flag and an environment variable, so the whole thing can run unattended with `--yes`:

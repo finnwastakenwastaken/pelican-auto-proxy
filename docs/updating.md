@@ -104,7 +104,8 @@ when it fails. Remote updates are off until you allow them, and the node's owner
 docker compose pull && docker compose up -d
 ```
 
-The same `AUTOPROXY_JOIN_CODE` in the compose file keeps it tied to the same peer.
+The same `AUTOPROXY_JOIN_CODE` in the compose file keeps it tied to the same peer. The image is published from 0.3.3
+on; a container you built from source is updated by building again from the new release's source.
 
 ## Plugin
 

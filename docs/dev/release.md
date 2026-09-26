@@ -38,6 +38,22 @@ run without a tag.
 | `install-vps.sh`, `install-client.sh`, `setup-node.sh` | `installers/`, copied as-is. |
 | `update.json` | Generated from `plugin.json`'s version and the tag; this is what the panel's plugin updater reads. |
 | `SHA256SUMS` | Checksums of every asset above, so both installers can verify what they downloaded before running it. |
+| `ghcr.io/<owner>/autoproxy-client:vX.Y.Z` and `:latest` | `client/Dockerfile`, `linux/amd64`, with `--build-arg AUTOPROXY_VERSION=<version>`. Not a release asset: pushed to the GitHub container registry with the workflow's own token (`permissions: packages: write`). |
+
+### The client image
+
+The Dockerfile stamps the version into the script the same way `scripts/package-client.sh` does, and refuses to
+build when the stamp line is missing. Before anything is pushed the workflow reads the image back: `autoproxy-client
+version` inside it must print the release number, and its script must be byte for byte the one in
+`autoproxy-client.tar.gz`. The image name is `ghcr.io/<repository owner, lower case>/autoproxy-client`, and a tag
+fails when that differs from `docker_image` in `plugin/autoproxy/config/autoproxy.php`, the name the Setup page
+prints in its Compose snippet. The push (`:vX.Y.Z`, then `:latest`) runs after every asset is built and checked, and
+before the release is created.
+
+The first push creates the package on GitHub. Check its visibility afterwards (the owner's Packages tab →
+`autoproxy-client` → Package settings): it has to be **public**, or every `docker compose pull` fails with "denied".
+Linking it to the public repository (the `org.opencontainers.image.source` label does that) makes it show on the
+repository page.
 
 The workflow calls `scripts/package-client.sh` and `scripts/make-plugin-zip.sh` rather than re-implementing them,
 so a release cannot produce a different layout than the one a developer tested locally before tagging.
@@ -114,11 +130,12 @@ The GitHub release itself is created with all of the above attached, using the t
 
 The release workflow can be started by hand from the Actions tab ("Release", "Run workflow") on any branch. That run
 derives the version from `plugin.json` instead of a tag, builds and checks every asset exactly as a tag push would
-(binary, client tarball, plugin zip, installers, `update.json`, `SHA256SUMS`, the sweep on the zip) and uploads them
-as a workflow artifact instead of creating a release. Two checks that would fail a real tag only warn on a dry run: a
-repository whose name differs from the one `plugin.json` publishes to, and a missing CHANGELOG section for the
-version. What a dry run does not exercise is the release creation itself; the first real tag is the first time that
-step runs.
+(binary, client tarball, client image, plugin zip, installers, `update.json`, `SHA256SUMS`, the sweep on the zip) and
+uploads them as a workflow artifact instead of creating a release. The client image is built and read back but
+never pushed. Two checks that would fail a real tag only warn on a dry run: a
+repository whose name differs from the one `plugin.json` publishes to (and an image name that differs from the one
+the plugin prints), and a missing CHANGELOG section for the version. What a dry run does not exercise is the release
+creation and the image push; the first real tag is the first time those steps run.
 
 ## Hub submission checklist
 

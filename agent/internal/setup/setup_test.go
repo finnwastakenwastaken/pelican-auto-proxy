@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/finnwastakenwastaken/pelican-auto-proxy/agent/internal/wg"
 )
@@ -259,3 +260,73 @@ func TestDistroDefaultNftablesConfIsRecognised(t *testing.T) {
 }
 
 func md5hex(b []byte) string { return fmt.Sprintf("%x", md5.Sum(b)) }
+
+// ipRuleShow is "ip rule show" on a VPS where setup has run, byte for byte as
+// iproute2 prints it: the rule is added as "not fwmark 0x2b lookup 201" but
+// printed with an implied "from all" in the middle.
+const ipRuleShow = "0:\tfrom all lookup local\n" +
+	"90:\tnot from all fwmark 0x2b lookup 201\n" +
+	"32766:\tfrom all lookup main\n" +
+	"32767:\tfrom all lookup default"
+
+// ruleRunner answers "ip rule show" with the rule present from the given look
+// onwards (0 = never), and everything else with an empty success.
+func ruleRunner(presentFrom int, looks *int) Runner {
+	return func(name string, args ...string) (string, error) {
+		if name == "ip" && strings.Join(args, " ") == "rule show" {
+			*looks++
+			if presentFrom > 0 && *looks >= presentFrom {
+				return ipRuleShow, nil
+			}
+			return "0:\tfrom all lookup local\n32766:\tfrom all lookup main", nil
+		}
+		return "", nil
+	}
+}
+
+// Seen on a real install: the verification block said "MISSING peer-routing
+// ip rule" while "ip rule show" listed it. The summary matched the rule as it
+// is typed, not as it is printed. It must use the same matcher as the code that
+// installs the rule.
+func TestVerificationFindsTheRuleAsIPRuleShowPrintsIt(t *testing.T) {
+	var looks, sleeps int
+	var out strings.Builder
+	e := &env{out: &out, run: ruleRunner(1, &looks), sleep: func(time.Duration) { sleeps++ }}
+	e.verificationSummary(7443)
+	if !strings.Contains(out.String(), "OK      peer-routing ip rule is installed") {
+		t.Fatalf("the rule is installed but the summary did not say so:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "MISSING peer-routing") {
+		t.Fatalf("false alarm for an installed rule:\n%s", out.String())
+	}
+	if sleeps != 0 {
+		t.Fatalf("waited %d times for a rule that was already there", sleeps)
+	}
+}
+
+// A rule that shows up a moment later (the agent re-ensures it when it starts)
+// is not a problem, so the summary looks again before it warns.
+func TestVerificationWaitsBrieflyForTheRule(t *testing.T) {
+	var looks, sleeps int
+	e := &env{out: io.Discard, run: ruleRunner(3, &looks), sleep: func(time.Duration) { sleeps++ }}
+	if !e.routingRuleInstalled() {
+		t.Fatal("a rule that appears on the third look was reported missing")
+	}
+	if looks != 3 || sleeps != 2 {
+		t.Fatalf("looks=%d sleeps=%d, want 3 and 2", looks, sleeps)
+	}
+}
+
+// A rule that never appears is still reported, after a bounded wait.
+func TestVerificationStillWarnsWhenTheRuleNeverAppears(t *testing.T) {
+	var looks, sleeps int
+	var out strings.Builder
+	e := &env{out: &out, run: ruleRunner(0, &looks), sleep: func(time.Duration) { sleeps++ }}
+	e.verificationSummary(7443)
+	if !strings.Contains(out.String(), "MISSING peer-routing ip rule") {
+		t.Fatalf("a missing rule was not reported:\n%s", out.String())
+	}
+	if looks != ruleCheckAttempts || sleeps != ruleCheckAttempts-1 {
+		t.Fatalf("looks=%d sleeps=%d, want %d and %d", looks, sleeps, ruleCheckAttempts, ruleCheckAttempts-1)
+	}
+}

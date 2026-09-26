@@ -106,6 +106,70 @@ class ForwardRuleInput
         return null;
     }
 
+    /**
+     * A forward straight to a machine that runs its own tunnel client (real
+     * client IPs), for example Wings' API or SFTP port on a proxied node.
+     * $peerModes is peer id => mode as the VPS lists them; empty when the VPS
+     * could not be asked, and then only "is anything chosen" is checked.
+     *
+     * The agent refuses a site client here ("forward to an address on its LAN
+     * with target_ip and via_peer"), so this says the same before push time.
+     *
+     * @param array<string, string> $peerModes
+     */
+    public static function targetPeerError(?string $peerId, array $peerModes): ?string
+    {
+        $peerId = trim((string) $peerId);
+
+        if ($peerId === '') {
+            return 'Choose the tunnel client to send it to.';
+        }
+
+        if ($peerModes === []) {
+            return null;
+        }
+
+        if (!array_key_exists($peerId, $peerModes)) {
+            return 'The VPS has no tunnel client "' . $peerId . '".';
+        }
+
+        if ($peerModes[$peerId] !== 'real') {
+            return 'That tunnel client is in site mode, so it cannot be the target itself. Send it to an address on its LAN, reached through that client, instead.';
+        }
+
+        return null;
+    }
+
+    /**
+     * The site client a LAN target is reached through. The mirror image of
+     * targetPeerError(): the agent refuses a real-IP client here ("forward to
+     * it with target_peer, not target_ip").
+     *
+     * @param array<string, string> $peerModes
+     */
+    public static function viaPeerError(?string $peerId, array $peerModes): ?string
+    {
+        $peerId = trim((string) $peerId);
+
+        if ($peerId === '') {
+            return 'Choose the tunnel client that sits on that LAN.';
+        }
+
+        if ($peerModes === []) {
+            return null;
+        }
+
+        if (!array_key_exists($peerId, $peerModes)) {
+            return 'The VPS has no tunnel client "' . $peerId . '".';
+        }
+
+        if ($peerModes[$peerId] !== 'site') {
+            return 'That tunnel client keeps real client IPs, so it does not forward to its LAN. Send it to that client directly instead.';
+        }
+
+        return null;
+    }
+
     /** A range is forwarded port for port, so there is no single port to remap to. */
     public static function targetPortError(mixed $targetPort, mixed $publicPortEnd): ?string
     {

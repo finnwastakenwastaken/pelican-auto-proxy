@@ -29,7 +29,8 @@ use Illuminate\Console\Command;
  *
  * Every check a value has to pass is shared with the admin UI rather than
  * repeated here: ClientInput for a new site client, ForwardRuleInput for a
- * manual forward, and ForwardRuleResource's peer lookups for the two pickers.
+ * manual forward (either destination), and ForwardRuleResource's peer lookups
+ * for the pickers.
  * A second copy of those rules would drift the first time one of them changed,
  * and the VPS would then refuse something the CLI had just accepted.
  */
@@ -48,8 +49,9 @@ class SetupCommand extends Command
         {--proto=both : add-forward: tcp, udp or both}
         {--public-port= : add-forward: the port on the VPS}
         {--public-port-end= : add-forward: the last port of a 1:1 range}
-        {--target-ip= : add-forward: the private LAN address to send it to}
-        {--via= : add-forward: the site client that sits on that LAN}
+        {--target-peer= : add-forward: send it straight to this real-IP tunnel client (peer id), e.g. Wings on a proxied node}
+        {--target-ip= : add-forward: or the private LAN address to send it to}
+        {--via= : add-forward: with --target-ip, the site client that sits on that LAN}
         {--target-port= : add-forward: a different port on the target (not allowed on a range)}
         {--notes= : add-forward: free text kept in the panel}
         {--disabled : add-forward: create it switched off}
@@ -585,9 +587,15 @@ class SetupCommand extends Command
     }
 
     /**
-     * A forward to an address on a LAN, through a site client. Every value is
-     * checked with ForwardRuleInput, the same helper the Forwards form uses, so
-     * the command refuses what the form refuses, in the same words.
+     * A manual forward, to either of the two destinations the Forwards form
+     * offers:
+     *   --target-peer  a machine running its own real-IP tunnel client, such
+     *                  as Wings' API or SFTP port on a proxied node;
+     *   --target-ip    an address on a LAN, reached through the site client
+     *                  named by --via.
+     * Every value is checked with ForwardRuleInput, the same helper the
+     * Forwards form uses, so the command refuses what the form refuses, in the
+     * same words.
      */
     protected function addForward(): int
     {
@@ -595,9 +603,28 @@ class SetupCommand extends Command
         $protocol = strtolower(trim((string) $this->option('proto')));
         $publicPort = trim((string) $this->option('public-port'));
         $publicPortEnd = trim((string) $this->option('public-port-end'));
+        $targetPeer = trim((string) $this->option('target-peer'));
         $targetIp = trim((string) $this->option('target-ip'));
         $via = trim((string) $this->option('via'));
         $targetPort = trim((string) $this->option('target-port'));
+
+        $toPeer = $targetPeer !== '';
+        $toLan = $targetIp !== '' || $via !== '';
+
+        // The form makes this choice with its "Send it to" picker; here it is
+        // which options were given. Both, or neither, is refused before
+        // anything else, because every other message depends on which it is.
+        if ($toPeer === $toLan) {
+            $this->error($toPeer
+                ? 'Give one destination, not both: --target-peer, or --target-ip with --via.'
+                : 'Say where it goes: --target-peer=<peer id>, or --target-ip=<LAN address> with --via=<peer id>.');
+            $this->line('  --target-peer  a machine running a real-IP tunnel client (it sees real client addresses),');
+            $this->line('                 for example Wings (8080) or SFTP (2022) on a proxied node');
+            $this->line('  --target-ip    an address on a LAN, with --via naming the site client on that LAN');
+            $this->line('`php artisan autoproxy:setup clients` lists the peer ids and their modes.');
+
+            return self::INVALID;
+        }
 
         $errors = array_filter([
             ForwardRuleInput::nameError($name),
@@ -607,7 +634,7 @@ class SetupCommand extends Command
             ForwardRuleInput::targetPortError($targetPort === '' ? null : $targetPort, $publicPortEnd === '' ? null : $publicPortEnd),
         ]);
 
-        if ($via === '') {
+        if ($toLan && $via === '') {
             $errors[] = 'Say which tunnel client sits on that LAN with --via=<peer id>. `php artisan autoproxy:setup clients` lists them.';
         }
 
@@ -619,48 +646,59 @@ class SetupCommand extends Command
             return self::INVALID;
         }
 
-        // The same two lookups the form's pickers use: site clients only for
-        // --via (the agent refuses a real-IP peer there), and that client's LAN
-        // ranges to check --target-ip against. An unreachable VPS returns an
-        // empty list from both, and then neither test can be made - so say that
-        // rather than pretending the value passed.
-        $siteClients = ForwardRuleResource::peerOptions(NodeSetting::MODE_SITE);
+        // The same lookups the form's pickers and rules use. An unreachable VPS
+        // returns an empty list, and then the destination cannot be checked at
+        // all - so say that rather than pretending the value passed.
+        $modes = ForwardRuleResource::peerModes();
 
-        if ($siteClients === []) {
-            $this->error('The VPS listed no site-mode tunnel clients, so --via cannot be checked and the forward would be refused at push time.');
+        if ($modes === []) {
+            $this->error('The VPS listed no tunnel clients, so the destination cannot be checked and the forward would be refused at push time.');
             $this->line('Check `php artisan autoproxy:setup test`, then `php artisan autoproxy:setup clients`.');
 
             return self::FAILURE;
         }
 
-        if (!array_key_exists($via, $siteClients)) {
-            $this->error('"' . $via . '" is not a site-mode tunnel client on this VPS.');
-            $this->line('Site clients: ' . implode(', ', array_keys($siteClients)));
+        if ($toPeer) {
+            $peerError = ForwardRuleInput::targetPeerError($targetPeer, $modes);
 
-            return self::INVALID;
+            if ($peerError !== null) {
+                $this->error($peerError);
+                $this->line('Real-IP clients: ' . (implode(', ', array_keys($modes, 'real', true)) ?: 'none'));
+
+                return self::INVALID;
+            }
+        } else {
+            $viaError = ForwardRuleInput::viaPeerError($via, $modes);
+
+            if ($viaError !== null) {
+                $this->error($viaError);
+                $this->line('Site clients: ' . (implode(', ', array_keys($modes, 'site', true)) ?: 'none'));
+
+                return self::INVALID;
+            }
+
+            $cidrs = ForwardRuleResource::peerLanCidrs()[$via] ?? [];
+            $ipError = ForwardRuleInput::targetIpError($targetIp, $cidrs);
+
+            if ($ipError !== null) {
+                $this->error($ipError);
+
+                return self::INVALID;
+            }
         }
 
-        $cidrs = ForwardRuleResource::peerLanCidrs()[$via] ?? [];
-        $ipError = ForwardRuleInput::targetIpError($targetIp === '' ? null : $targetIp, $cidrs);
-
-        if ($ipError !== null) {
-            $this->error($ipError);
-
-            return self::INVALID;
-        }
-
-        $rule = ForwardRule::create([
+        $rule = ForwardRule::create(ForwardRuleResource::normaliseTarget([
             'name' => trim($name),
             'protocol' => $protocol,
             'public_port' => (int) $publicPort,
             'public_port_end' => $publicPortEnd === '' ? null : (int) $publicPortEnd,
-            'target_peer' => null,
-            'target_ip' => $targetIp,
-            'via_peer' => $via,
+            'target_peer' => $toPeer ? $targetPeer : null,
+            'target_ip' => $toPeer ? null : $targetIp,
+            'via_peer' => $toPeer ? null : $via,
             'target_port' => $targetPort === '' ? null : (int) $targetPort,
             'enabled' => !$this->option('disabled'),
             'notes' => trim((string) $this->option('notes')) ?: null,
-        ]);
+        ]));
 
         $this->info('Forward #' . $rule->id . ' created: ' . $rule->protocol . ' ' . $rule->portLabel() . ' -> ' . $rule->targetLabel() . ($rule->enabled ? '' : ' (disabled)'));
 

@@ -10,10 +10,12 @@ use Arrowtje\AutoProxy\Models\SyncState;
 use Arrowtje\AutoProxy\Services\AgentClient;
 use Arrowtje\AutoProxy\Services\LatestRelease;
 use Arrowtje\AutoProxy\Services\SyncService;
+use Arrowtje\AutoProxy\Services\WingsRouteCheck;
 use Arrowtje\AutoProxy\Filament\Admin\Widgets\StaleSyncBanner;
 use Arrowtje\AutoProxy\Support\AutoProxySettings;
 use Arrowtje\AutoProxy\Support\ClientVersion;
 use Arrowtje\AutoProxy\Support\PeerHealth;
+use Arrowtje\AutoProxy\Support\WingsRoute;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Notifications\Notification;
@@ -249,6 +251,30 @@ class AutoProxyStatus extends Page
             : $this->notify('Could not look up the latest release', (string) $latest['error'], false);
     }
 
+    /**
+     * Look every node's hostname up again now, for an admin who just added a
+     * hosts entry and wants to see the warning go. Bounded by
+     * WingsRouteCheck::BUDGET_SECONDS; the page itself never looks anything up.
+     */
+    public function recheckWingsRoute(): void
+    {
+        $this->guard();
+
+        try {
+            $checked = WingsRouteCheck::refresh();
+        } catch (\Throwable $exception) {
+            $this->notify('Could not check the nodes\' hostnames', $exception->getMessage(), false);
+
+            return;
+        }
+
+        $count = count($checked['findings']);
+
+        $count === 0
+            ? $this->notify('The panel reaches every node directly', 'No node\'s hostname resolves to the VPS from this panel any more.', true)
+            : $this->notify($count . ' node(s) still reached through the VPS', 'Their hostnames still resolve to the VPS from this panel. A hosts entry in a Docker panel needs the container re-created.', false);
+    }
+
     protected function notify(string $title, string $body, bool $ok): void
     {
         $notification = Notification::make()->title($title)->body($body);
@@ -335,6 +361,13 @@ class AutoProxyStatus extends Page
                 static fn (array $row): array => $row + ['message' => PeerHealth::message($row)],
                 StaleSyncBanner::unhealthyPeers($state),
             ),
+            'wingsDetours' => array_map(
+                static fn (array $row): array => $row + ['message' => WingsRoute::message($row, AutoProxySettings::endpointIp())],
+                WingsRouteCheck::current(),
+            ),
+            'wingsCheckedAt' => ($checked = WingsRouteCheck::cached()) !== null ? Carbon::createFromTimestamp($checked['checked_at']) : null,
+            'wingsDocsUrl' => AutoProxySettings::docsUrl(WingsRoute::DOCS_PAGE),
+            'wingsTroubleshootingUrl' => AutoProxySettings::docsUrl('troubleshooting.md#nodes-flicker-offline-or-the-console-page-shows-403-errors'),
             'refreshedAt' => Carbon::now(),
             'pollSeconds' => static::POLL_SECONDS,
             'publicAllocationCount' => $state->allocation_rule_count

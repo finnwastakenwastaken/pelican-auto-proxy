@@ -159,11 +159,20 @@ path works and the port stays.
 
 ## Docker / Compose flavour
 
+The normal way is the published image, `ghcr.io/finnwastakenwastaken/autoproxy-client` (`:latest`, or `:vX.Y.Z`
+for one release; from 0.3.3 on, `linux/amd64`), with the Compose snippet the plugin's Setup page prints; see
+[docs/install-client.md](../docs/install-client.md). `compose.yml` in this directory builds the image from source
+instead:
+
 ```
 cd client
 cp .env.example .env   # fill in AUTOPROXY_JOIN_CODE
 docker compose up -d
 ```
+
+A source build reports its version as `dev`, and the plugin then cannot tell whether it is up to date. Set
+`AUTOPROXY_VERSION=X.Y.Z` in `.env` (or pass `--build-arg AUTOPROXY_VERSION=X.Y.Z` to `docker build`) when you build
+a release's source, and it reports that number, exactly as the published image does.
 
 The container needs `network_mode: host` and `cap_add: NET_ADMIN` (already set in `compose.yml`): the
 WireGuard interface and nft tables must live in the host's kernel network namespace, or a container

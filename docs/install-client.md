@@ -106,6 +106,11 @@ services:
 The container never runs `install`: on first start it reads `AUTOPROXY_JOIN_CODE` (and `AUTOPROXY_HOST_IP`, if set)
 from the environment and writes the same config files the system-service flavour does, straight onto the host.
 
+The image is published with every release from 0.3.3 on, for `linux/amd64`: `:latest` follows the newest release,
+and `:vX.Y.Z` (for example `:v0.3.3`) stays on that release, if you would rather choose when to move. It carries the
+same client script as that release's system-service download and reports that version, so the Status page can tell
+when it is out of date. There is no image for releases before 0.3.3.
+
 `network_mode: host` and `cap_add: NET_ADMIN` are required, not optional extras: the tunnel interface and its
 nftables rules have to live in the host's own network namespace so a container restart or image update does not
 disconnect players — the tunnel and its connection tracking stay in the kernel, not in the container.

@@ -93,6 +93,9 @@ type env struct {
 	opts Options
 	out  io.Writer
 	run  Runner
+	// sleep is time.Sleep unless a test replaces it; only the verification
+	// summary waits for anything.
+	sleep func(time.Duration)
 }
 
 func (e *env) log(format string, a ...any)  { fmt.Fprintf(e.out, ">> "+format+"\n", a...) }
@@ -737,6 +740,42 @@ func (e *env) isDistroDefault(current []byte) bool {
 	return false
 }
 
+// Up to this many looks at "ip rule show", ruleCheckWait apart, before the
+// verification summary calls the peer-routing rule missing.
+const (
+	ruleCheckAttempts = 6
+	ruleCheckWait     = 500 * time.Millisecond
+)
+
+// routingRuleInstalled asks the same question EnsureRoutingRule asks, with the
+// same matcher, and gives the rule a few seconds to appear.
+//
+// Before 0.3.3 this summary matched the text "not fwmark 0x2b lookup 201",
+// which is how the rule is added but not how "ip rule show" prints it ("90:
+// not from all fwmark 0x2b lookup 201"). Every real install therefore printed
+// "MISSING peer-routing ip rule" although the rule was there, and looked like
+// a timing problem because the rule was plainly present when checked by hand
+// a moment later. The retry covers the case that really is timing: setup
+// installs the rule itself above, and "systemctl restart autoproxy-agent"
+// makes the agent re-ensure it on start, so a slow start must not produce a
+// false alarm either.
+func (e *env) routingRuleInstalled() bool {
+	m := wg.Manager{WGBin: "wg", IPBin: "ip", Iface: WGIface, Run: wg.Runner(e.run)}
+	sleep := e.sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	for attempt := 1; ; attempt++ {
+		if m.HasRoutingRule() {
+			return true
+		}
+		if attempt >= ruleCheckAttempts {
+			return false
+		}
+		sleep(ruleCheckWait)
+	}
+}
+
 func (e *env) verificationSummary(apiPort int) {
 	fmt.Fprintln(e.out, "\n==================== Verification ====================")
 	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil && strings.TrimSpace(string(b)) == "1" {
@@ -758,14 +797,9 @@ func (e *env) verificationSummary(apiPort int) {
 	} else {
 		e.warn("  %s is not up: clients cannot connect until it is", WGIface)
 	}
-	// autoproxy-agent installs the fwmark and the peer-routing ip rule itself
-	// on every start (the same "state is truth, reapply on boot" pattern
-	// peers already use), right before it re-applies any stored peer. By the
-	// time this summary runs, "systemctl restart autoproxy-agent" above has
-	// already had a moment to do that -- see docs/dev/decisions.md for why a
-	// missing rule here means a site peer whose lan_cidrs cover its own
-	// endpoint would never complete a handshake.
-	if out, _ := e.run("ip", "rule", "show"); strings.Contains(out, fmt.Sprintf("not fwmark %s lookup %s", wg.DefaultFWMark, wg.DefaultTable)) {
+	// See docs/dev/decisions.md for why a missing rule here means a site peer
+	// whose lan_cidrs cover its own endpoint would never complete a handshake.
+	if e.routingRuleInstalled() {
 		fmt.Fprintf(e.out, "  OK      peer-routing ip rule is installed (table %s)\n", wg.DefaultTable)
 	} else {
 		e.warn("  MISSING peer-routing ip rule: check 'journalctl -u autoproxy-agent' -- a site peer whose")

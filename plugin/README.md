@@ -154,6 +154,8 @@ php artisan autoproxy:setup client-join-command <peer-id> [--yes]
 php artisan autoproxy:setup remove-client <peer-id>
 
 php artisan autoproxy:setup forwards
+php artisan autoproxy:setup add-forward --name="wings api" --proto=tcp --public-port=8080 \
+    --target-peer=<peer-id> [--target-port=8080] [--notes="..."] [--disabled]
 php artisan autoproxy:setup add-forward --name="panel" --proto=tcp --public-port=8080 \
     --target-ip=10.0.0.10 --via=<peer-id> [--target-port=80] [--notes="..."] [--disabled]
 php artisan autoproxy:setup remove-forward <id>
@@ -169,10 +171,13 @@ php artisan autoproxy:setup remove-forward <id>
   one; that path warns and needs `--yes`.
 - **remove-client** deletes the client, closes its ports, and switches off any node reached through it.
   A client that belongs to a node is refused — use `disable-node` for those.
-- **add-forward** creates a manual forward to a LAN address through a site client and pushes it straight
-  away. It applies the same rules as the Forwards form, in the same words: RFC1918 target only, inside
-  the ranges that client covers, ports 1–65535, a range end at or above the start, and no target port on
-  a range.
+- **add-forward** creates a manual forward and pushes it straight away, to one of two destinations:
+  `--target-peer` sends it to a machine running its own real-IP tunnel client (for example Wings' API or
+  SFTP port on a proxied node; its peer id is in `nodes` and `clients`), or `--target-ip` with `--via`
+  sends it to a LAN address through the site client on that LAN. Both or neither is refused. It applies
+  the same rules as the Forwards form, in the same words: the right kind of client for each destination,
+  RFC1918 LAN target only and inside the ranges that client covers, ports 1–65535, a range end at or
+  above the start, and no target port on a range.
 - **remove-forward** deletes a manual forward by the id `forwards` lists, and pushes.
 
 The Setup page remains the normal path, and the one this page walks through. The other command the

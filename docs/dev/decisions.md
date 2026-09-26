@@ -2,6 +2,18 @@
 
 Newest first. Record why, and what was rejected. No infrastructure values from any real deployment belong here.
 
+## 2026-09-24: Warn when the panel reaches Wings through the VPS (0.3.3)
+
+- Pelican's server-status call to Wings allows one second in total. A node whose hostname resolves to the VPS makes
+  the panel take the tunnel for it, and lost packets there showed as nodes flickering offline and 403s on the
+  console page. The fix is outside the plugin (a hosts entry on the panel), so the plugin only says so, per node.
+- **Resolved with `getent ahosts` under a two-second process timeout, from the scheduled sync, at most every ten
+  minutes; pages read the stored answer.** getent goes through the same resolver the panel's HTTP client uses,
+  `/etc/hosts` included, which is what makes the fix visible. Rejected: `gethostbynamel()` on page load (no timeout
+  of its own, and a page that polls every 30 seconds would repeat it); `dns_get_record()` (skips `/etc/hosts`, so
+  it would keep warning after the fix). `gethostbynamel()` is only the fallback when getent is missing.
+- An unanswered lookup is never reported: a false alarm would send the admin editing hosts files for nothing.
+
 ## 2026-09-23: Client versions and remote updates (0.3.0)
 
 - Updating a client needed the join code, which the panel shows once. Now: the client carries its real version
